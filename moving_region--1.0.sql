@@ -69,7 +69,7 @@ BEGIN
     the_intervalregion.dest_time = dest_time;
     the_intervalregion.src_reg = src_reg;
     the_intervalregion.dest_reg = dest_reg;
-   -- SELECT create_msegments(src_time, dest_time, src_reg, dest_reg) INTO the_intervalregion.moving_segments;
+    SELECT create_msegments(src_time, dest_time, src_reg, dest_reg) INTO the_intervalregion.moving_segments;
     RETURN the_intervalregion;
 END
 $$ LANGUAGE plpgsql;
@@ -111,5 +111,173 @@ DECLARE the_length FLOAT;
 BEGIN
     SELECT ST_Length(the_line) INTO the_length;
     RETURN the_length+20;
+END
+$$ LANGUAGE plpgsql;
+
+-- FUNGSI CREATE MSEGMENTS
+CREATE OR REPLACE FUNCTION public.create_msegments(src_time float, dest_time float, src_reg geometry, dest_reg geometry)
+RETURNS msegment[] AS $$
+DECLARE the_msegments msegment[];
+BEGIN
+    SELECT interpolate_convex_simple(src_time, dest_time, src_reg, dest_reg) INTO the_msegments;
+    return the_msegments;
+END
+$$ LANGUAGE plpgsql;
+
+-------------------------------------------------------------------------
+------------------------------- HELPERS ---------------------------------
+-------------------------------------------------------------------------
+
+-- FUNGSI PROGRESS ANGLE
+-- SELECT calculate_progress_angle(ST_GeomFromText('LINESTRING(3 3,0 0)', 4326))
+CREATE OR REPLACE FUNCTION public.calculate_progress_angle(seg segment)
+RETURNS FLOAT AS $$
+DECLARE 
+	progress_angle float;
+	primary_endpoint geometry(POINT, 4326);
+	secondary_endpoint geometry(POINT, 4326);
+BEGIN
+    -- progress angle calculation algorithm here
+    /* angle formed by rotating an imaginary ray shooting in 
+    the negative y direction counterclockwise around the primary 
+    endpoint of s until its collinear and overlapping with s */
+    SELECT ST_PointN(seg, 1) INTO primary_endpoint;
+    SELECT ST_PointN(seg, 2) INTO secondary_endpoint;
+    SELECT 360 - degrees(ST_Azimuth(secondary_endpoint, primary_endpoint)) INTO progress_angle;
+    return progress_angle;
+END
+$$ LANGUAGE plpgsql;
+
+-- FUNGSI GET SEGMENT KE N DARI SIMPLE CONVEX REGION
+-- SELECT ST_AsText(get_segment_n(1, (ST_Polygon('LINESTRING(0 0, 77 29, 30 32, 0 0)', 4326))))
+CREATE OR REPLACE FUNCTION public.get_segment_n(n integer, the_region cycle)
+RETURNS segment AS $$
+DECLARE 
+    segmentN segment;
+BEGIN
+    SELECT ST_MakeLine(ST_PointN(ST_Boundary(the_region),n) , ST_PointN(ST_Boundary(the_region),n+1) )
+    INTO segmentN;
+    RETURN segmentN;
+END
+$$ LANGUAGE plpgsql;
+
+-- FUNGSI CREATE 3D POINT FROM A 2D POINT
+-- SELECT create_3d_point(ST_GeomFromText('POINT(2 2)',4326),100)
+CREATE OR REPLACE FUNCTION public.create_3d_point(xy_index Point2D, z_index float)
+RETURNS Point3D AS $$
+DECLARE point_3d Point3D;
+BEGIN
+    SELECT ST_SetSRID(ST_MakePoint(ST_X(xy_index),ST_Y(xy_index),z_index),4326) INTO point_3d;
+    RETURN point_3d;
+END
+$$ LANGUAGE plpgsql;
+
+-- FUNGSI CREATE MSEGMENT FROM POINT AND SEGMENT
+-- SELECT create_msegment1(ST_GeomFromText('LINESTRING(3 3,0 0)', 4326), 0, ST_GeomFromText('POINT(2 2)',4326), 5)
+CREATE OR REPLACE FUNCTION public.create_msegment1(seg segment, z_index_seg float, p Point2D, z_index_p float)
+RETURNS msegment AS $$
+    SELECT  msegment(
+                create_3d_point(ST_PointN(seg,1), z_index_seg),
+                create_3d_point(ST_PointN(seg,2), z_index_seg),
+                create_3d_point(p, z_index_p)
+            );
+$$ LANGUAGE SQL;
+
+-- FUNGSI ST_AsText UNTUK MSEGMENT
+CREATE OR REPLACE FUNCTION public.ST_AsText(mseg msegment)
+RETURNS text AS $$
+BEGIN
+    RETURN CONCAT('(',ST_AsText(mseg.mseg_a),',',ST_AsText(mseg.mseg_b),',',ST_AsText(mseg.mseg_c),')');
+END
+$$ LANGUAGE plpgsql;
+
+-- FUNGSI INTERPOLASI CONVEX SIMPLE REGIONS
+-- SELECT interpolate_convex_simple(1, 100, ST_Polygon('LINESTRING(0 0, 16 0, 8 8, 0 0)', 4326), ST_Polygon('LINESTRING(0 0, 8 0, 4 4, 0 0)', 4326))
+-- select interpolate_convex_simple(1, 100, ST_Polygon('LINESTRING(0 0, 4 -2, 8 0, 8 8, 4 10, 0 8, 0 0)', 4326), ST_Polygon('LINESTRING(0 0, 8 0, 8 8, 0 8, 0 0)', 4326))
+CREATE OR REPLACE FUNCTION public.interpolate_convex_simple(src_time float, dest_time float, src_reg geometry, dest_reg geometry)
+RETURNS msegment[] AS $$
+DECLARE 
+    the_msegments msegment[];
+    r_current segment;  d_current segment;
+    r_last segment;     d_last segment;
+    r_prev segment;     d_prev segment;
+    r_angle float;      d_angle float;
+    rn integer;        	dn integer;     an integer;
+BEGIN
+    -- Interpolation algorithm here
+    -- find least segments s from src reg and d from dest reg (idx = 0)
+    -- assign initial values
+    rn = 1;
+    dn = 1;
+    an = 1;
+    SELECT  get_segment_n(rn,src_reg), 
+            get_segment_n(-2,src_reg),
+            get_segment_n(dn,dest_reg), 
+            get_segment_n(-2,dest_reg)
+    INTO r_current, r_last, d_current, d_last;
+
+    SELECT ST_GeomFromText('LINESTRING(0 0, 0 0)', 4326) into r_prev;
+    SELECT ST_GeomFromText('LINESTRING(0 0, 0 0)', 4326) into d_prev;
+
+    SELECT  calculate_progress_angle(r_current), 
+            calculate_progress_angle(d_current)
+    INTO r_angle, d_angle;
+
+    -- begin for loop to create delta triangles (moving segments)
+    LOOP
+        IF ((NOT ST_Equals(d_current,d_prev)) AND (NOT ST_Equals(r_current,r_prev))) THEN
+            IF (r_angle < d_angle) THEN
+                -- append a moving segment: r to d's primary point
+                SELECT array_append(the_msegments, create_msegment1(r_current, src_time, ST_PointN(d_current,1), dest_time)) into the_msegments;
+                RAISE NOTICE 'msegment added: %',ST_AsText(the_msegments[an]);
+                an = an +1;
+                -- append a moving segment: d to r's secondary point
+                SELECT array_append(the_msegments, create_msegment1(d_current, dest_time, ST_PointN(r_current,2), src_time)) into the_msegments;
+                RAISE NOTICE 'msegment added: %',ST_AsText(the_msegments[an]);
+                an = an +1;
+            ELSE
+                -- append a moving segment: d to r's primary point
+                SELECT array_append(the_msegments, create_msegment1(d_current, dest_time, ST_PointN(r_current,1), src_time)) into the_msegments;
+                RAISE NOTICE 'msegment added: %',ST_AsText(the_msegments[an]);
+                an = an +1;
+                -- append a moving segment: r to d's secondary point
+                SELECT array_append(the_msegments, create_msegment1(r_current, src_time, ST_PointN(d_current,2), dest_time)) into the_msegments;
+                RAISE NOTICE 'msegment added: %',ST_AsText(the_msegments[an]);
+                an = an +1;
+            END IF;
+        ELSE
+            IF (NOT ST_Equals(d_current, d_prev)) THEN
+                -- append a moving segment: d to r's secondary point
+                SELECT array_append(the_msegments, create_msegment1(d_current, dest_time, ST_PointN(r_current,2), src_time)) into the_msegments;
+                RAISE NOTICE 'msegment added: %',ST_AsText(the_msegments[an]);
+                an = an +1;
+            END IF;
+
+            IF (NOT ST_Equals(r_current, r_prev)) THEN
+                -- append a moving segment: r to d's secondary point
+                SELECT array_append(the_msegments, create_msegment1(r_current, src_time, ST_PointN(d_current,2), dest_time)) into the_msegments;
+                RAISE NOTICE 'msegment added: %',ST_AsText(the_msegments[an]);
+                an = an +1;
+            END IF;
+        END IF;
+
+        -- proceed to the next segment in the region
+        r_prev = r_current;
+        d_prev = d_current;
+        SELECT calculate_progress_angle(get_segment_n(rn+1,src_reg)) INTO r_angle;
+        SELECT calculate_progress_angle(get_segment_n(dn+1,dest_reg)) INTO d_angle;
+        
+        IF (NOT ST_Equals(r_current, r_last)) AND (r_angle < d_angle OR ST_Equals(d_current, d_last)) THEN
+            rn = rn + 1;
+            SELECT  get_segment_n(rn,src_reg) INTO r_current;
+        ELSIF NOT ST_Equals(d_current, d_last) THEN
+            dn = dn + 1;
+            SELECT  get_segment_n(dn,dest_reg) INTO d_current;
+        END IF;
+
+    -- Exit loop when reach the end of each region
+    EXIT WHEN ( ST_Equals(r_current,r_last) AND ST_Equals(r_current,r_prev) AND ST_Equals(d_current,d_last) AND ST_Equals(d_current,d_prev) );
+    END LOOP;
+    RETURN the_msegments;
 END
 $$ LANGUAGE plpgsql;
