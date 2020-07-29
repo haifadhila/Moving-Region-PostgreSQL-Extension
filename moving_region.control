@@ -1,0 +1,6 @@
+# moving_region extension
+comment = 'Oracle compatible moving region function'
+directory = 'extension/moving_region'
+default_version = '1.0'
+module_pathname = '$libdir/mr/moving_region'
+relocatable = false
