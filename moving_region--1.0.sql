@@ -105,7 +105,7 @@ $$ LANGUAGE SQL;
 
 -- MOVING REGION
 -- CREATE TABLE tes5(idd serial primary key, the_mregion mregion);
-/* update tes_mreg 
+/* update tes5
 SET the_mregion = (1,something)
 FROM (Select append_intervalregion(the_intervalregion) as something from test_intvl where idd=1) as som
 */
@@ -386,8 +386,34 @@ BEGIN
 END
 $$ LANGUAGE plpgsql;
 
--- TRAVERSE
+-- TRAVERSED
+CREATE OR REPLACE FUNCTION public.traversed(mreg mregion)
+RETURNS geometry AS $$
+DECLARE
+    intvlreg intervalregion;
+    mseg msegment;
+    result geometry;
+    i integer;
+BEGIN
+    SELECT get_src_region(atinstant_intvlreg(mreg,get_tstart(deftime(mreg)))) INTO result;
 
+    FOREACH intvlreg IN ARRAY mreg::intervalregion[]
+    LOOP
+        FOR i in get_src_time(intvlreg)..get_dest_time(intvlreg)
+        LOOP
+            -- When the z index % 5 is not 0, n error encountered with 3DIntersect function.
+            -- Should be fixed soon 
+            IF ((i%5 = 0)) THEN
+                SELECT ST_Union(result,val(atinstant(mreg,i))) INTO result;
+                RAISE NOTICE 'i: %',i;
+                RAISE NOTICE 'val: %',st_astext(val(atinstant(mreg,i)));
+            END IF;
+        END LOOP;
+    END LOOP;
+
+    RETURN result;
+END
+$$ LANGUAGE plpgsql;
 
 -- INST: Get time instant in an intime
 CREATE OR REPLACE FUNCTION public.inst(the_intime intime)
@@ -407,7 +433,106 @@ $$ LANGUAGE SQL;
 -------------------------------------------------------------------------
 
 -- ATINSTANT
+CREATE OR REPLACE FUNCTION public.atinstant(mreg mregion, inst float)
+RETURNS intime AS $$
+DECLARE
+    arr_multipoints geometry[]; arr_points geometry[];
+    val geometry;
+    intvlreg intervalregion; intvlreg_idx float;
+    msegments msegment[];
+    mseg msegment;
+    delta_triangle geometry;
+    infinite_inst_plane geometry;
+    src_time float; dest_time float;
+BEGIN
+    -- If time instant is present in mregion
+    IF present(mreg, inst) THEN
+        SELECT  get_src_time(atinstant_intvlreg(mreg, inst)),
+                get_dest_time(atinstant_intvlreg(mreg, inst))
+        INTO src_time, dest_time;
+
+        raise notice 'sr time: %',src_time;
+        raise notice 'sr time: %',dest_time;
+
+        IF (src_time = inst) THEN 
+            SELECT get_src_region(atinstant_intvlreg(mreg, inst)) INTO val;
+        ELSIF (dest_time = inst) THEN
+            SELECT get_dest_region(atinstant_intvlreg(mreg, inst)) INTO val;
+        ELSE
+            -- Get msegments in interval region in which the time instant is present
+            SELECT get_moving_segments(atinstant_intvlreg(mreg, inst)) INTO msegments;
+            -- Get infinite instant plane to intersect with delta triangle
+            SELECT create_infinite_instant_plane(inst) INTO infinite_inst_plane;
+            -- Traverse through all delta triangles to intersect it with infinite instant plane
+            -- to get linestring and then create polygon
+            FOREACH mseg IN ARRAY msegments
+            LOOP
+                RAISE NOTICE 'The msegment? %', ST_AsText(mseg);
+                SELECT create_triangle_msegment(mseg) INTO delta_triangle;
+                RAISE NOTICE 'The triangle: %', ST_AsText(delta_triangle);
+                SELECT array_append(arr_multipoints,ST_3DIntersection(delta_triangle,infinite_inst_plane)) INTO arr_multipoints;
+                RAISE NOTICE 'The intersection: %', ST_AsText(ST_LineFromMultiPoint(ST_3DIntersection(delta_triangle,infinite_inst_plane)));
+            END LOOP;
+            SELECT get_sorted_points(sort_multipoint_array(arr_multipoints)) INTO arr_points;
+            SELECT ST_SetSRID(ST_MakePolygon(ST_MakeLine(arr_points)),4326) INTO val;
+            RAISE NOTICE 'DONE YAY';
+        END IF;
+    ELSE 
+        RETURN NULL;
+    END IF;
+
+    RETURN intime(inst,ST_Force2D(val));
+END
+$$ LANGUAGE plpgsql;
+
 -- ATPERIODS
+CREATE OR REPLACE FUNCTION public.atperiods(mreg mregion, per period)
+RETURNS mregion AS $$
+DECLARE
+    mreg_result intervalregion[];
+    idx_tstart integer;
+    idx_tend integer;
+    reg_tstart geometry;
+    reg_tend geometry;
+    intvlreg intervalregion;
+    i integer;
+BEGIN
+    IF present(mreg, per) THEN
+        SELECT  atinstant_intvlreg_idx(mreg, get_tstart(per)),
+                atinstant_intvlreg_idx(mreg, get_tend(per)),
+                val(atinstant(mreg,get_tstart(per))),
+                val(atinstant(mreg,get_tend(per)))
+        INTO idx_tstart, idx_tend, reg_tstart, reg_tend;
+        -- In the same interval region
+        IF (idx_tstart = idx_tend) THEN
+            SELECT append_intervalregion(mreg_result,intervalregion(get_tstart(per), get_tend(per), reg_tstart, reg_tend))
+            INTO mreg_result;
+            RETURN mreg_result;
+        -- In different interval region
+        ELSE
+            --SELECT atinstant_intvlreg(mreg, get_tstart(per)) INTO intvlreg;
+            SELECT append_intervalregion(mreg_result,intervalregion(get_tstart(per), get_dest_time(atinstant_intvlreg(mreg, get_tstart(per))), reg_tstart, get_dest_region(atinstant_intvlreg(mreg, get_tstart(per)))))
+            INTO mreg_result;
+
+            IF ((idx_tend - idx_tstart) > 1) THEN
+                FOR i IN 1..(idx_tend-idx_tstart-1)
+                LOOP
+                    SELECT append_intervalregion(mreg_result, mreg[i+idx_start]) INTO mreg_result;
+                END LOOP;
+            END IF;
+
+            --SELECT atinstant_intvlreg(mreg, get_tend(per)) INTO intvlreg;
+            SELECT append_intervalregion(mreg_result, intervalregion(get_src_time(atinstant_intvlreg(mreg, get_tend(per))), get_tend(per), get_src_region(atinstant_intvlreg(mreg, get_tend(per))), reg_tend))
+            INTO mreg_result;
+
+            RETURN mreg_result;
+        END IF;
+    ELSE
+        RETURN NULL;
+    END IF;  
+END
+$$ LANGUAGE plpgsql;
+
 
 -- INITIAL
 CREATE OR REPLACE FUNCTION public.initial(mreg mregion)
@@ -437,15 +562,28 @@ BEGIN
 END
 $$ LANGUAGE plpgsql;
 
--- PRESENT
+-- PRESENT (time: instant)
 CREATE OR REPLACE FUNCTION public.present(mreg mregion, inst float)
 RETURNS boolean AS $$
     SELECT get_tstart(deftime(mreg)) <= inst 
     AND get_tend(deftime(mreg)) >= inst;
 $$ LANGUAGE SQL;
 
+-- PRESENT (time: period)
+CREATE OR REPLACE FUNCTION public.present(mreg mregion, per period)
+RETURNS boolean AS $$
+    SELECT get_tstart(deftime(mreg)) <= get_tstart(per) 
+    AND get_tend(deftime(mreg)) >= get_tend(per);
+$$ LANGUAGE SQL;
+
+-- AT
+
+-- ATMIN
+
+-- ATMAX
+
 -------------------------------------------------------------------------
---------------------------- HELPERS PART 2 ------------------------------
+------------------------ HELPERS FOR ATINSTANT --------------------------
 -------------------------------------------------------------------------
 
 -- FUNGSI CREATE INFINITE INSTANT PLANE
@@ -461,24 +599,29 @@ BEGIN
     SELECT array_append(arr_point, ST_MakePoint(400,400,inst)) INTO arr_point;
     SELECT array_append(arr_point, ST_MakePoint(-400,400,inst)) INTO arr_point;
     SELECT array_append(arr_point, ST_MakePoint(-400,-400,inst)) INTO arr_point;
-    RETURN ST_MakePolygon(ST_MakeLine(arr_point));
+    RETURN ST_SetSRID(ST_MakePolygon(ST_MakeLine(arr_point)),4326);
 END
 $$ LANGUAGE plpgsql;
 
+-- CREATE TRIANGLE OF LINESTRING FROM MOVING SEGMENT
+--select create_triangle_msegment(msegment(ST_GeomFromText('POINT(0 0 0)',4326),ST_GeomFromText('POINT(0 2 3)',4326), ST_GeomFromText('POINT(1 4 3)',4326)))
 CREATE OR REPLACE FUNCTION public.create_triangle_msegment(mseg msegment)
 RETURNS geometry AS $$
 DECLARE
     arr_point geometry[];
+    triangle geometry;
 BEGIN
     SELECT array_append(arr_point, mseg.mseg_a::geometry) INTO arr_point;
     SELECT array_append(arr_point, mseg.mseg_b::geometry) INTO arr_point;
     SELECT array_append(arr_point, mseg.mseg_c::geometry) INTO arr_point;
     SELECT array_append(arr_point, mseg.mseg_a::geometry) INTO arr_point;
-    return ST_MakePolygon(ST_MakeLine(arr_point));
+
+    SELECT ST_SetSRID(ST_MakeLine(arr_point),4326) INTO triangle;
+    return triangle;
 END
 $$ LANGUAGE plpgsql;
 
--- FUNGSI GET INTERVAL REGION IDX BY INSTANT
+-- FUNGSI GET INTERVAL REGION BY INSTANT
 CREATE OR REPLACE FUNCTION public.atinstant_intvlreg(mreg mregion, inst float)
 RETURNS intervalregion AS $$
 DECLARE
@@ -497,41 +640,64 @@ BEGIN
 END
 $$ LANGUAGE plpgsql;
 
--- FUNGSI ATINSTANT
-CREATE OR REPLACE FUNCTION public.atinstant(mreg mregion, inst float)
-RETURNS intime AS $$
+-- FUNGSI GET INTERVAL REGION IDX BY INSTANT
+CREATE OR REPLACE FUNCTION public.atinstant_intvlreg_idx(mreg mregion, inst float)
+RETURNS integer AS $$
 DECLARE
-    arr_segment geometry[];
-    val geometry;
-    intvlreg intervalregion;
-    msegments msegment[];
-    mseg msegment;
-    delta_triangle geometry;
-    infinite_inst_plane geometry;
+    intvlreg intervalregion[];
+	i integer;
 BEGIN
-    -- If time instant is present in mregion
-    IF present(mreg, inst) THEN
-        RAISE NOTICE 'huh 1';
-        -- Get interval region in which the time instant is present
-        SELECT atinstant_intvlreg(mreg, inst) INTO intvlreg;
-        RAISE NOTICE 'huh 2';
-        SELECT get_moving_segments(intvlreg) INTO msegments;
-        RAISE NOTICE 'huh 3';
-        -- Get infinite instant plane to intersect with delta triangle
-        SELECT create_infinite_instant_plane(inst) INTO infinite_inst_plane;
-        RAISE NOTICE 'huh 4';
-        -- Traverse through all delta triangles to intersect it with infinite instant plane
-        -- to get linestring and then create polygon
-        FOREACH mseg IN ARRAY msegments
-        LOOP
-            SELECT create_triangle_msegment(mseg) INTO delta_triangle;
-            SELECT array_append(arr_segment,ST_3DIntersection(delta_triangle,infinite_inst_plane)) INTO arr_segment;
-        END LOOP;
-        SELECT ST_MakePolygon(arr_segment) INTO val;
-    ELSE 
-        RETURN NULL;
-    END IF;
+    SELECT mreg::intervalregion[] INTO intvlreg;
+	FOR i IN 1..array_length(intvlreg,1)
+	LOOP
+		IF (inst >= get_src_time(intvlreg[i]) AND inst <= get_dest_time(intvlreg[i])) THEN
+			RETURN i;
+		END IF;
+	END LOOP;
+	RETURN NULL;
+END
+$$ LANGUAGE plpgsql;
 
-    RETURN intime(inst,val);
+-- SORT MULTIPOINT ARRAY
+CREATE OR REPLACE FUNCTION public.sort_multipoint_array(arr_multipoint geometry[])
+RETURNS geometry[] AS $$
+DECLARE
+    arr_new geometry[];
+    switched_multipoint geometry;
+BEGIN
+    FOR i IN 1..array_length(arr_multipoint,1)
+        LOOP
+            IF i=1 THEN
+                SELECT array_append(arr_new, arr_multipoint[i]) INTO arr_new;
+            ELSE
+                IF ST_Equals(ST_GeometryN(arr_multipoint[i],1), ST_GeometryN(arr_multipoint[i-1],2)) THEN
+                    SELECT array_append(arr_new, arr_multipoint[i]) INTO arr_new;
+                ELSE
+                    SELECT ST_Collect(ST_GeometryN(arr_multipoint[i],2), ST_GeometryN(arr_multipoint[i],1)) INTO switched_multipoint;
+                    SELECT array_append(arr_new, switched_multipoint) INTO arr_new;
+                END IF;
+            END IF;
+        END LOOP;
+		RETURN arr_new;
+END
+$$ LANGUAGE plpgsql;
+
+-- GET ARRAY OF POINTS FROM SORTED MULTIPOINT ARRAY
+CREATE OR REPLACE FUNCTION public.get_sorted_points(arr_multipoint geometry[])
+RETURNS geometry[] AS $$
+DECLARE
+    arr_new geometry[];
+    switched_multipoint geometry;
+BEGIN
+    FOR i IN 1..array_length(arr_multipoint,1)
+        LOOP
+            IF i=1 THEN
+                SELECT array_append(arr_new, ST_GeometryN(arr_multipoint[i],1)) INTO arr_new;
+            ELSE
+               SELECT array_append(arr_new, ST_GeometryN(arr_multipoint[i],1)) INTO arr_new;
+               SELECT array_append(arr_new, ST_GeometryN(arr_multipoint[i],2)) INTO arr_new;
+            END IF;
+        END LOOP;
+    RETURN arr_new;
 END
 $$ LANGUAGE plpgsql;
