@@ -107,6 +107,16 @@ FROM (Select append_intervalregion(the_intervalregion) as something from test_in
 */
 CREATE DOMAIN mregion intervalregion[];
 
+CREATE OR REPLACE FUNCTION public.mregion(intvlreg intervalregion)
+RETURNS mregion AS $$
+    SELECT append_intervalregion(intvlreg)::mregion;
+$$ LANGUAGE SQL;
+
+CREATE OR REPLACE FUNCTION public.mregion(intvlregs intervalregion[])
+RETURNS mregion AS $$
+    SELECT intvlregs::mregion;
+$$ LANGUAGE SQL;
+
 -- PERIOD
 CREATE TYPE period AS (
     tstart float,
