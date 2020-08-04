@@ -39,10 +39,6 @@ BEGIN
 END
 $$ LANGUAGE plpgsql;
 
--- Turn the moving segment into a 3D triangle (so that it can be processed with PostGIS functions)
--- CREATE OR REPLACE FUNCTION public.create_delta_triangle(the_msegment msegment)
-
-
 -- CYCLE
 -- CREATE TABLE tes3(idd serial primary key, the_cycle cycle);
 -- insert into tes3(the_cycle) values(ST_Polygon('LINESTRING(0 0, 77 29, 30 32, 0 0)', 4326));
@@ -155,6 +151,34 @@ BEGIN
     RETURN the_intime;
 END
 $$ LANGUAGE plpgsql;
+
+CREATE TYPE pg_segment AS{
+    arr_pg float[];
+    arr_segment segment[];
+}
+
+-- pg_segment constructor
+CREATE OR REPLACE FUNCTION public.pg_segment(arr_pg float[], arr_segment segment[])
+RETURNS pg_segment AS $$
+DECLARE the_pg_segment pg_segment;
+BEGIN
+    the_pg_segment.arr_pg := arr_pg;
+    the_pg_segment.arr_segment := arr_segment;
+    RETURN the_pg_segment;
+END
+$$ LANGUAGE plpgsql;
+
+-- arr_pg getter
+CREATE OR REPLACE FUNCTION public.get_arr_pg(elmt pg_segment)
+RETURNS float[] AS $$
+    SELECT elmt.arr_pg;
+$$ LANGUAGE SQL;
+
+-- arr_segment getter
+CREATE OR REPLACE FUNCTION public.get_arr_segment(elmt pg_segment)
+RETURNS segment[] AS $$
+    SELECT elmt.arr_segment;
+$$ LANGUAGE SQL;
 
 -------------------------------------------------------------------------
 ----------------------- FUNCTIONS AND PROCEDURES ------------------------
@@ -452,7 +476,7 @@ BEGIN
         INTO src_time, dest_time;
 
         raise notice 'sr time: %',src_time;
-        raise notice 'sr time: %',dest_time;
+        raise notice 'dest time: %',dest_time;
 
         IF (src_time = inst) THEN 
             SELECT get_src_region(atinstant_intvlreg(mreg, inst)) INTO val;
@@ -473,8 +497,10 @@ BEGIN
                 SELECT array_append(arr_multipoints,ST_3DIntersection(delta_triangle,infinite_inst_plane)) INTO arr_multipoints;
                 RAISE NOTICE 'The intersection: %', ST_AsText(ST_LineFromMultiPoint(ST_3DIntersection(delta_triangle,infinite_inst_plane)));
             END LOOP;
+            SELECT ST_PrintText(arr_multipoints) INTO arr_points;
             SELECT get_sorted_points(sort_multipoint_array(arr_multipoints)) INTO arr_points;
-            SELECT ST_SetSRID(ST_MakePolygon(ST_MakeLine(arr_points)),4326) INTO val;
+            SELECT ST_PrintText(arr_points) INTO arr_points;
+            SELECT ST_SimplifyPreserveTopology(ST_SetSRID(ST_MakePolygon(ST_MakeLine(arr_points)),4326),0) INTO val;
             RAISE NOTICE 'DONE YAY';
         END IF;
     ELSE 
@@ -486,6 +512,7 @@ END
 $$ LANGUAGE plpgsql;
 
 -- ATPERIODS
+-- select traversed(atperiods(the_mregion,period(67,125))) from tes5
 CREATE OR REPLACE FUNCTION public.atperiods(mreg mregion, per period)
 RETURNS mregion AS $$
 DECLARE
@@ -577,10 +604,62 @@ RETURNS boolean AS $$
 $$ LANGUAGE SQL;
 
 -- AT
+CREATE OR REPLACE FUNCTION public.at(mreg mregion, geom geometry)
+RETURNS mregion AS $$
+DECLARE
+    tstart float;
+    tend float;
+    tstart_found boolean;
+    tend_found boolean;
+    both_found boolean;
+	intvlreg intervalregion;
+    time_last float;
+BEGIN
+    tstart_found = false;
+    tend_found = false;
+    both_found = false;
+    FOREACH intvlreg IN ARRAY mreg::intervalregion[]
+    LOOP
+        FOR i in get_src_time(intvlreg)..get_dest_time(intvlreg)
+        LOOP
+            -- When the z index % 5 is not 0, n error encountered with 3DIntersect function.
+            -- Should be fixed soon 
+            IF (i%5 = 0) THEN
+                -- look for tstart in which mreg initially passes the 'geom'
+                IF (NOT tstart_found) THEN
+                    IF (ST_Intersects(geom, val(atinstant(mreg, i)))) THEN
+                        tstart = i;
+                        tstart_found = true;
+                    END IF;
+                -- if tstart found, look for the tend
+                ELSE
+                    IF (NOT ST_Intersects(geom, val(atinstant(mreg, i)))) THEN
+                        tend = i;
+                        tend_found = true;
+                    END IF;
+                END IF;
+            END IF;
+        EXIT WHEN (tend_found);
+        END LOOP;
+        time_last = get_dest_time(intvlreg);
+    END LOOP;
+
+    IF (NOT tend_found) THEN
+        tend = time_last;
+    END IF; 
+    RETURN atperiods(mreg, period(tstart, tend));
+END
+$$ LANGUAGE plpgsql;
 
 -- ATMIN
 
 -- ATMAX
+
+-- PASSES
+CREATE OR REPLACE FUNCTION public.passes(mreg mregion, geom geometry)
+RETURNS boolean AS $$
+    SELECT ST_Intersects(traversed(mreg), geom);
+$$ LANGUAGE SQL;
 
 -------------------------------------------------------------------------
 ------------------------ HELPERS FOR ATINSTANT --------------------------
@@ -665,17 +744,20 @@ DECLARE
     arr_new geometry[];
     switched_multipoint geometry;
 BEGIN
-    FOR i IN 1..array_length(arr_multipoint,1)
+    RAISE NOTICE 'SORT IDX PERTAMA';
+    SELECT array_append(arr_new, arr_multipoint[1]) INTO arr_new;
+    FOR i IN 2..array_length(arr_multipoint,1)
         LOOP
-            IF i=1 THEN
+            RAISE NOTICE 'SORT IDX BERIKUTNYA';
+            RAISE NOTICE 'INI %', st_astext(ST_GeometryN(arr_new[i-1],2));
+            RAISE NOTICE 'INI %', st_astext(ST_GeometryN(arr_multipoint[i],1));
+            IF ST_Distance(ST_GeometryN(arr_multipoint[i],1),ST_GeometryN(arr_new[i-1],2)) < 0.00000000001 THEN
+                RAISE NOTICE 'SAMA NIH';
                 SELECT array_append(arr_new, arr_multipoint[i]) INTO arr_new;
             ELSE
-                IF ST_Equals(ST_GeometryN(arr_multipoint[i],1), ST_GeometryN(arr_multipoint[i-1],2)) THEN
-                    SELECT array_append(arr_new, arr_multipoint[i]) INTO arr_new;
-                ELSE
-                    SELECT ST_Collect(ST_GeometryN(arr_multipoint[i],2), ST_GeometryN(arr_multipoint[i],1)) INTO switched_multipoint;
-                    SELECT array_append(arr_new, switched_multipoint) INTO arr_new;
-                END IF;
+                RAISE NOTICE 'BEDA NIH';
+                SELECT ST_Collect(ST_GeometryN(arr_multipoint[i],2), ST_GeometryN(arr_multipoint[i],1)) INTO switched_multipoint;
+                SELECT array_append(arr_new, switched_multipoint) INTO arr_new;
             END IF;
         END LOOP;
 		RETURN arr_new;
@@ -687,17 +769,255 @@ CREATE OR REPLACE FUNCTION public.get_sorted_points(arr_multipoint geometry[])
 RETURNS geometry[] AS $$
 DECLARE
     arr_new geometry[];
-    switched_multipoint geometry;
 BEGIN
     FOR i IN 1..array_length(arr_multipoint,1)
         LOOP
             IF i=1 THEN
                 SELECT array_append(arr_new, ST_GeometryN(arr_multipoint[i],1)) INTO arr_new;
+                SELECT array_append(arr_new, ST_GeometryN(arr_multipoint[i],2)) INTO arr_new;
             ELSE
-               SELECT array_append(arr_new, ST_GeometryN(arr_multipoint[i],1)) INTO arr_new;
-               SELECT array_append(arr_new, ST_GeometryN(arr_multipoint[i],2)) INTO arr_new;
+               SELECT array_append(arr_new, ST_GeometryN(arr_multipoint[i],2)) INTO arr_new;             
             END IF;
         END LOOP;
     RETURN arr_new;
+END
+$$ LANGUAGE plpgsql;
+
+-- GET ARRAY OF POINTS FROM SORTED MULTIPOINT ARRAY
+CREATE OR REPLACE FUNCTION public.create_multi_arr(lol integer)
+RETURNS geometry[] AS $$
+DECLARE
+    the_array geometry[];
+BEGIN   
+    SELECT array_append(the_array, ST_Collect(ST_MakePoint(0,0),ST_MakePoint(8,0))) INTO the_array;
+    SELECT array_append(the_array, ST_Collect(ST_MakePoint(8,0),ST_MakePoint(8,8))) INTO the_array;
+    SELECT array_append(the_array, ST_Collect(ST_MakePoint(8,8),ST_MakePoint(4,10))) INTO the_array;
+    SELECT array_append(the_array, ST_Collect(ST_MakePoint(4,10),ST_MakePoint(0,8))) INTO the_array;
+    SELECT array_append(the_array, ST_Collect(ST_MakePoint(0,8),ST_MakePoint(0,0))) INTO the_array;
+    return the_array;
+END
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION public.ST_PrintText(arr geometry[])
+RETURNS geometry[] AS $$
+DECLARE
+    the_array geometry[];
+    elmt geometry;
+BEGIN  
+    the_array := arr;
+    FOREACH elmt in ARRAY arr
+    LOOP
+        RAISE NOTICE 'THE ELMT: %', ST_AsText(elmt);
+    END LOOP;
+    return the_array;
+END
+$$ LANGUAGE plpgsql;
+
+-------------------------------------------------------------------------
+--------------------- INTERPOLASI SIMPLE NONCONVEX ----------------------
+-------------------------------------------------------------------------
+
+-- CHECK IF POLYGON IS CONVEX
+CREATE OR REPLACE FUNCTION public.is_convex(reg geometry)
+RETURNS boolean AS $$
+    SELECT ST_Equals(reg, ST_ConvexHull(reg));
+$$ LANGUAGE SQL;
+
+-- CREATE ARRAY OF PROGRESS ANGLE DAN ARRAY OF LINESTRINGS OF IT (ORIGINAL)
+CREATE OR REPLACE FUNCTION public.create_array_pg(reg geometry)
+RETURNS pg_segment AS $$
+DECLARE
+    arr_pg float[];
+    arr_segment segment[];
+    r_current segment;
+    r_last segment;
+    idx integer;   
+BEGIN  
+    idx = 1;
+    SELECT get_segment_n(-2,reg)
+    INTO r_last;
+    
+    LOOP
+        SELECT get_segment_n(idx, reg) INTO r_current;
+        SELECT array_append(arr_segment, r_current) INTO arr_segment;
+        SELECT array_append(arr_pg, calculate_progress_angle(r_current)) INTO arr_pg;
+        RAISE NOTICE 'segment: %',st_astext(r_current);
+        RAISE NOTICE 'angle: %', calculate_progress_angle(r_current); 
+        idx := idx + 1;
+    EXIT WHEN (ST_Equals(r_current, r_last));
+    END LOOP;
+
+    RETURN pg_segment(arr_pg, arr_segment);
+END
+$$ LANGUAGE plpgsql;
+
+-- COMPARE ORIGINAL ARRAY AND CONVEX HULL ARRAY. RETURN: NEW ORIGINAL PG_SEGMENT
+CREATE OR REPLACE FUNCTION public.get_new_pg_ori(ori_seg segment[], chull pg_segment)
+RETURNS float[] AS $$
+DECLARE
+    ori_pg float[];
+    chull_seg segment[];
+    chull_pg float[];
+    idx integer;
+    cidx integer;
+BEGIN 
+    RAISE NOTICE 'LEWAT SINI GAIS';
+    
+    SELECT get_arr_pg(chull), get_arr_segment(chull) INTO chull_pg, chull_seg;
+    RAISE NOTICE 'pg chull: %', chull_pg;
+    idx = 1;
+    cidx = 1;
+    LOOP
+        IF (ST_Equals(ori_seg[idx], chull_seg[cidx])) THEN
+            SELECT array_append(ori_pg, chull_pg[cidx]) INTO ori_pg;
+            cidx = cidx + 1;
+        ELSE
+            SELECT array_append(ori_pg, chull_pg[cidx]) INTO ori_pg;
+            IF (ST_Equals(ST_PointN(ori_seg[idx],2), ST_PointN(chull_seg[cidx],2))) THEN
+                cidx = cidx + 1;
+            END IF;
+        END IF;
+        idx = idx + 1;
+
+    EXIT WHEN (idx > array_length(ori_seg,1));
+    END LOOP;
+    RAISE NOTICE 'pg ori: %', ori_pg;
+    RETURN ori_pg;
+END
+$$ LANGUAGE plpgsql;
+
+
+
+-- INTERPOLASI SIMPLE NONCONVEX
+CREATE OR REPLACE FUNCTION public.interpolate_nonconvex_simple(src_time float, dest_time float, src_reg geometry, dest_reg geometry)
+RETURNS msegment[] AS $$
+DECLARE 
+    src segment[]; -- array of src geom's linestrings
+    dest segment[];
+    src_chull geometry[]; -- array of src geom's convex hull linestrings
+    dest_chull geometry[];
+    src_pg float[]; -- array of src geom's linestrings' progress angles
+    dest_pg float[];
+    src_pg_chull float[]; -- array of src geom's convex hull linestrings' progress angles
+    dest_pg_chull float[];
+    src_reg_chull geometry;
+    dest_reg_chull geometry;
+BEGIN
+    -- Interpolation algorithm here
+    -- intialize array values of original regions
+        SELECT  get_arr_segment(create_array_pg(src_reg)), 
+                get_arr_segment(create_array_pg(dest_reg))
+        INTO src, dest;
+
+    -- If convex
+    IF (is_convex(src_reg) AND is_convex(src_reg)) THEN
+        -- progress angle = unchanged
+        SELECT  get_arr_pg(create_array_pg(src_reg)), 
+                get_arr_pg(create_array_pg(dest_reg))
+        INTO src_pg, dest_pg;
+        RETURN interpolate_simple(src_time, dest_time, src, dest, src_pg, dest_pg);
+    -- If nonconvex
+    ELSE
+        -- intialize array values of convex hull regions
+        SELECT  get_arr_segment(create_array_pg(ST_ConvexHull(src_reg))), 
+                get_arr_segment(create_array_pg(ST_ConvexHull(dest_reg))),
+                get_arr_pg(create_array_pg(ST_ConvexHull(src_reg))), 
+                get_arr_pg(create_array_pg(ST_ConvexHull(dest_reg)))
+        INTO src_chull, dest_chull, src_pg_chull, dest_pg_chull;
+        -- progress angle = changed based in convexhull progress angle
+        SELECT get_new_pg_ori(src, pg_segment(src_pg_chull, src_chull)) INTO src_pg;
+        SELECT get_new_pg_ori(dest, pg_segment(dest_pg_chull, dest_chull)) INTO dest_pg;
+
+        RETURN interpolate_simple(src_time, dest_time, src, dest, src_pg, dest_pg);
+    END IF;
+END
+$$ LANGUAGE plpgsql;
+
+
+-- INTERPOLATE SIMPLE REGION
+CREATE OR REPLACE FUNCTION public.interpolate_simple(src_time float, dest_time float, src segment[], dest segment[], src_pg float[], dest_pg float[])
+RETURNS msegment[] AS $$
+DECLARE 
+    the_msegments msegment[];
+    r_current segment;  d_current segment;
+    r_last segment;     d_last segment;
+    r_prev segment;     d_prev segment;
+    r_angle float;      d_angle float;
+    rn integer;        	dn integer;     an integer;
+BEGIN
+    -- Interpolation algorithm here
+    -- find least segments s from src reg and d from dest reg (idx = 0)
+    -- assign initial values
+    rn = 1;
+    dn = 1;
+    an = 1;
+    SELECT  src[rn], 
+            src[array_length(src,1)],
+            dest[dn], 
+            dest[array_length(dest,1)]
+    INTO r_current, r_last, d_current, d_last;
+
+    SELECT ST_GeomFromText('LINESTRING(0 0, 0 0)', 4326) into r_prev;
+    SELECT ST_GeomFromText('LINESTRING(0 0, 0 0)', 4326) into d_prev;
+
+    SELECT  src_pg[rn], dest_pg[dn]
+    INTO r_angle, d_angle;
+
+    -- begin for loop to create delta triangles (moving segments)
+    LOOP
+        IF ((NOT ST_Equals(d_current,d_prev)) AND (NOT ST_Equals(r_current,r_prev))) THEN
+            IF (r_angle < d_angle) THEN
+                -- append a moving segment: r to d's primary point
+                SELECT array_append(the_msegments, create_msegment1(r_current, src_time, ST_PointN(d_current,1), dest_time)) into the_msegments;
+                RAISE NOTICE 'msegment added: %',ST_AsText(the_msegments[an]);
+                an = an +1;
+                -- append a moving segment: d to r's secondary point
+                SELECT array_append(the_msegments, create_msegment1(d_current, dest_time, ST_PointN(r_current,2), src_time)) into the_msegments;
+                RAISE NOTICE 'msegment added: %',ST_AsText(the_msegments[an]);
+                an = an +1;
+            ELSE
+                -- append a moving segment: d to r's primary point
+                SELECT array_append(the_msegments, create_msegment1(d_current, dest_time, ST_PointN(r_current,1), src_time)) into the_msegments;
+                RAISE NOTICE 'msegment added: %',ST_AsText(the_msegments[an]);
+                an = an +1;
+                -- append a moving segment: r to d's secondary point
+                SELECT array_append(the_msegments, create_msegment1(r_current, src_time, ST_PointN(d_current,2), dest_time)) into the_msegments;
+                RAISE NOTICE 'msegment added: %',ST_AsText(the_msegments[an]);
+                an = an +1;
+            END IF;
+        ELSE
+            IF (NOT ST_Equals(d_current, d_prev)) THEN
+                -- append a moving segment: d to r's secondary point
+                SELECT array_append(the_msegments, create_msegment1(d_current, dest_time, ST_PointN(r_current,2), src_time)) into the_msegments;
+                RAISE NOTICE 'msegment added: %',ST_AsText(the_msegments[an]);
+                an = an +1;
+            END IF;
+
+            IF (NOT ST_Equals(r_current, r_prev)) THEN
+                -- append a moving segment: r to d's secondary point
+                SELECT array_append(the_msegments, create_msegment1(r_current, src_time, ST_PointN(d_current,2), dest_time)) into the_msegments;
+                RAISE NOTICE 'msegment added: %',ST_AsText(the_msegments[an]);
+                an = an +1;
+            END IF;
+        END IF;
+
+        -- proceed to the next segment in the region
+        r_prev = r_current;
+        d_prev = d_current;
+        SELECT  src_pg[rn+1], dest_pg[dn+1]
+        INTO r_angle, d_angle;
+        
+        IF (NOT ST_Equals(r_current, r_last)) AND (r_angle < d_angle OR ST_Equals(d_current, d_last)) THEN
+            rn = rn + 1;
+            SELECT  src[rn] INTO r_current;
+        ELSIF NOT ST_Equals(d_current, d_last) THEN
+            dn = dn + 1;
+            SELECT  dest[dn] INTO d_current;
+        END IF;
+
+    -- Exit loop when reach the end of each region
+    EXIT WHEN ( ST_Equals(r_current,r_last) AND ST_Equals(r_current,r_prev) AND ST_Equals(d_current,d_last) AND ST_Equals(d_current,d_prev) );
+    END LOOP;
+    RETURN the_msegments;
 END
 $$ LANGUAGE plpgsql;
