@@ -219,7 +219,7 @@ CREATE OR REPLACE FUNCTION public.create_msegments(src_time float, dest_time flo
 RETURNS msegment[] AS $$
 DECLARE the_msegments msegment[];
 BEGIN
-    SELECT interpolate_convex_simple(src_time, dest_time, src_reg, dest_reg) INTO the_msegments;
+    SELECT interpolate_nonconvex_simple(src_time, dest_time, src_reg, dest_reg) INTO the_msegments;
     return the_msegments;
 END
 $$ LANGUAGE plpgsql;
@@ -896,6 +896,150 @@ BEGIN
 END
 $$ LANGUAGE plpgsql;
 
+-- COMPARE ORIGINAL ARRAY AND CONVEX HULL ARRAY. RETURN: NEW ORIGINAL PG_SEGMENT
+CREATE OR REPLACE FUNCTION public.get_new_pg_ori2(ori_seg segment[], chull pg_segment)
+RETURNS float[] AS $$
+DECLARE
+    ori_pg float[];
+    chull_seg segment[];
+    chull_pg float[];
+    idx integer;
+    cidx integer;
+BEGIN 
+    RAISE NOTICE 'LEWAT SINI GAIS YG KEDUA TAPIIII';
+    SELECT get_arr_pg(chull), get_arr_segment(chull) INTO chull_pg, chull_seg;
+    RAISE NOTICE 'pg chull: %', chull_pg;
+    idx = 1;
+    cidx = 1;
+    FOR i IN 1..array_length(ori_seg, 1)
+    LOOP
+        SELECT find_pg_idx(ori_seg, i, chull_seg) INTO idx;
+        IF (idx = -1) THEN
+            SELECT array_append(ori_pg, ori_pg[i-1]) INTO ori_pg;
+        ELSE
+            SELECT array_append(ori_pg, chull_pg[idx]) INTO ori_pg;
+        END IF;
+    END LOOP;
+    RAISE NOTICE 'pg ori: %', ori_pg;
+    RETURN ori_pg;
+END
+$$ LANGUAGE plpgsql;
+
+-- COMPARE ORIGINAL ARRAY AND CONVEX HULL ARRAY. RETURN: NEW ORIGINAL PG_SEGMENT
+CREATE OR REPLACE FUNCTION public.find_pg_idx(ori_seg segment[], ori_idx integer, chull_seg segment[])
+RETURNS integer AS $$
+DECLARE
+    idx integer;
+    i integer;
+    found boolean;
+BEGIN 
+    found = false;
+    idx = 0;
+    -- Find idx in chull array where ori_seg is located (to assign progress angle(pg))
+    FOR i IN 1..array_length(chull_seg, 1)
+    LOOP
+        IF ST_Equals(ori_seg[ori_idx], chull_seg[i]) THEN
+            idx = i;
+            found = true;
+        END IF;
+    EXIT WHEN found;        
+    END LOOP;
+    -- if found, return.
+    IF (idx != 0) THEN
+        RETURN idx;
+    -- if not found, it's in concavity. so, look for it's closing segment
+    ELSE
+        FOR i IN 1..array_length(chull_seg, 1)
+        LOOP
+            IF ST_Equals(ST_PointN(ori_seg[ori_idx], 1), ST_PointN(chull_seg[i], 1)) THEN
+                idx = i;
+                found = true;
+            ELSIF ST_Equals(ST_PointN(ori_seg[ori_idx], 1), ST_PointN(chull_seg[i], 1)) THEN 
+                idx = i;
+                found = true;
+            END IF;
+        EXIT WHEN found;        
+        END LOOP;
+    END IF;
+    -- if found, return
+    IF (idx != 0) THEN
+        RETURN idx;
+    -- if still not found, it's in 'deeper' concavity where none of its point shares with closing segment.
+    -- look for closing segment by comparing its previous segment.
+    ELSE
+        IF (ori_idx != 1) THEN
+            -- it means just assign the previous progress angle in the ori segments
+            idx = -1;
+        ELSE
+            SELECT find_pg_idx_compare(ori_seg[ori_idx], ori_idx, chull_seg) INTO idx;
+        END IF;
+    END IF;
+    RETURN idx;
+END
+$$ LANGUAGE plpgsql;
+
+
+-- COMPARE ORIGINAL ARRAY AND CONVEX HULL ARRAY. RETURN: NEW ORIGINAL PG_SEGMENT
+CREATE OR REPLACE FUNCTION public.find_pg_idx_compare(ori_seg segment[], ori_idx integer, chull_seg segment[])
+RETURNS integer AS $$
+DECLARE
+    idx integer;
+    i integer;
+    found boolean;
+BEGIN 
+    idx = 0;
+    i = ori_idx;
+    found = false;
+    LOOP 
+        IF (idx != 0) THEN
+            found = true;
+        ELSE
+            IF (i = 1) THEN  
+                SELECT array_length(ori_seg, 1) INTO i;
+            ELSE
+                i = i - 1;
+            END IF;
+        END IF;
+        SELECT find_pg_idx_simple(ori_seg[i], chull_seg) INTO idx;
+    EXIT WHEN found;
+    END LOOP;
+    -- after found, return the closing segment idx (idx + 1)
+    IF (idx = array_length(chull_seg,1)) THEN
+        idx = 1;
+    ELSE
+        idx = idx + 1;
+    END IF;
+
+    RETURN idx;
+END
+$$ LANGUAGE plpgsql;
+
+
+-- COMPARE ORIGINAL ARRAY AND CONVEX HULL ARRAY. RETURN: NEW ORIGINAL PG_SEGMENT
+CREATE OR REPLACE FUNCTION public.find_pg_idx_simple(ori_seg segment, chull_seg segment[])
+RETURNS integer AS $$
+DECLARE
+    idx integer;
+    found boolean;
+BEGIN 
+    found = false;
+    idx = 0;
+    -- Find idx in chull array where ori_seg is located (to assign progress angle(pg))
+    FOR i IN 1..array_length(chull_seg, 1)
+    LOOP
+        IF ST_Equals(ori_seg, chull_seg[i]) THEN
+            idx = i;
+            found = true;
+        END IF;
+    EXIT WHEN found;        
+    END LOOP;
+    RETURN idx;
+END
+$$ LANGUAGE plpgsql;
+
+-- select st_astext(ST_ForcePolygonCCW(st_convexhull(ST_Polygon('LINESTRING(0 0, 4 2, 8 0, 8 8, 4 10, 0 8, 0 0)', 4326))))
+-- select interpolate_nonconvex_simple(1,100,(ST_Polygon('LINESTRING(0 0, 4 2, 8 0, 8 8, 4 10, 0 8, 0 0)', 4326)),(ST_Polygon('LINESTRING(0 0, 8 0, 8 8, 0 8, 0 0)', 4326)))
+-- select mregion(intervalregion(1,100,(ST_Polygon('LINESTRING(0 0, 4 2, 8 0, 8 8, 4 10, 0 8, 0 0)', 4326)),(ST_Polygon('LINESTRING(0 0, 8 0, 8 4, 4 4, 4 8, 0 8, 0 0)', 4326))))
 
 
 -- INTERPOLASI SIMPLE NONCONVEX
@@ -914,31 +1058,48 @@ DECLARE
     dest_reg_chull geometry;
 BEGIN
     -- Interpolation algorithm here
-    -- intialize array values of original regions
+    IF (ST_GeometryType(src_reg) = 'ST_Point') THEN
+        SELECT get_arr_segment(create_array_pg(dest_reg)) INTO dest;
+        RETURN interpolate_src_point(src_time, dest_time, src_reg, dest);
+    ELSIF (ST_GeometryType(dest_reg) = 'ST_Point') THEN
+        SELECT get_arr_segment(create_array_pg(src_reg)) INTO src;
+        RETURN interpolate_dest_point(src_time, dest_time, src, dest_reg);
+    ELSE
         SELECT  get_arr_segment(create_array_pg(src_reg)), 
                 get_arr_segment(create_array_pg(dest_reg))
         INTO src, dest;
+        -- If convex
+        IF (is_convex(src_reg) AND is_convex(src_reg)) THEN
+            -- progress angle = unchanged
+            SELECT  get_arr_pg(create_array_pg(src_reg)), 
+                    get_arr_pg(create_array_pg(dest_reg))
+            INTO src_pg, dest_pg;
+            RETURN interpolate_simple(src_time, dest_time, src, dest, src_pg, dest_pg);
+        -- If nonconvex
+        ELSE
+            -- create convex hull of regions and equalize their directions with original regions
+            IF (ST_IsPolygonCW(src_reg)) THEN 
+                SELECT ST_ForcePolygonCW(ST_ConvexHull(src_reg)) INTO src_reg_chull;
+            ELSE 
+                SELECT ST_ForcePolygonCCW(ST_ConvexHull(src_reg)) INTO src_reg_chull;
+            END IF;
+            IF (ST_IsPolygonCW(dest_reg)) THEN 
+                SELECT ST_ForcePolygonCW(ST_ConvexHull(dest_reg)) INTO dest_reg_chull;
+            ELSE 
+                SELECT ST_ForcePolygonCCW(ST_ConvexHull(dest_reg)) INTO dest_reg_chull;
+            END IF;
+            -- intialize array values of convex hull regions
+            SELECT  get_arr_segment(create_array_pg(src_reg_chull)), 
+                    get_arr_segment(create_array_pg(dest_reg_chull)),
+                    get_arr_pg(create_array_pg(src_reg_chull)), 
+                    get_arr_pg(create_array_pg(dest_reg_chull))
+            INTO src_chull, dest_chull, src_pg_chull, dest_pg_chull;
+            -- progress angle = changed based in convexhull progress angle
+            SELECT get_new_pg_ori2(src, pg_segment(src_pg_chull, src_chull)) INTO src_pg;
+            SELECT get_new_pg_ori2(dest, pg_segment(dest_pg_chull, dest_chull)) INTO dest_pg;
 
-    -- If convex
-    IF (is_convex(src_reg) AND is_convex(src_reg)) THEN
-        -- progress angle = unchanged
-        SELECT  get_arr_pg(create_array_pg(src_reg)), 
-                get_arr_pg(create_array_pg(dest_reg))
-        INTO src_pg, dest_pg;
-        RETURN interpolate_simple(src_time, dest_time, src, dest, src_pg, dest_pg);
-    -- If nonconvex
-    ELSE
-        -- intialize array values of convex hull regions
-        SELECT  get_arr_segment(create_array_pg(ST_ConvexHull(src_reg))), 
-                get_arr_segment(create_array_pg(ST_ConvexHull(dest_reg))),
-                get_arr_pg(create_array_pg(ST_ConvexHull(src_reg))), 
-                get_arr_pg(create_array_pg(ST_ConvexHull(dest_reg)))
-        INTO src_chull, dest_chull, src_pg_chull, dest_pg_chull;
-        -- progress angle = changed based in convexhull progress angle
-        SELECT get_new_pg_ori(src, pg_segment(src_pg_chull, src_chull)) INTO src_pg;
-        SELECT get_new_pg_ori(dest, pg_segment(dest_pg_chull, dest_chull)) INTO dest_pg;
-
-        RETURN interpolate_simple(src_time, dest_time, src, dest, src_pg, dest_pg);
+            RETURN interpolate_simple(src_time, dest_time, src, dest, src_pg, dest_pg);
+        END IF;
     END IF;
 END
 $$ LANGUAGE plpgsql;
@@ -1031,3 +1192,57 @@ BEGIN
     RETURN the_msegments;
 END
 $$ LANGUAGE plpgsql;
+
+-- select interpolate_nonconvex_simple(1, 100, ST_GeomFromText('POINT(100 100)', 4326), ST_POLYGON('LINESTRING(0 0, 8 0, 4 4, 8 8, 0 8, 0 0)', 4326))
+-- select st_astext(st_normalize(st_convexhull(ST_POLYGON('LINESTRING(0 0, 8 0, 4 4, 8 8, 6 4, 4 8, 2 4, 0 8, 0 0)', 4326))))
+
+
+-- INTERPOLATE SIMPLE REGION WITH DEST = POINT
+CREATE OR REPLACE FUNCTION public.interpolate_dest_point(src_time float, dest_time float, src segment[], dest_point geometry)
+RETURNS msegment[] AS $$
+DECLARE
+    the_msegments msegment[];
+    r_seg segment;  
+    rn integer;
+BEGIN
+    -- Interpolation algorithm here
+    -- each segment must project triangle to the src point
+    rn = 1;
+    -- begin for loop to create delta triangles (moving segments)
+    FOREACH r_seg IN ARRAY src
+    LOOP
+        SELECT array_append(the_msegments, create_msegment1(r_seg, src_time, dest_point, dest_time)) into the_msegments;
+        RAISE NOTICE 'msegment added: %',ST_AsText(the_msegments[rn]);
+        rn = rn + 1;
+    END LOOP;
+    RETURN the_msegments;
+END
+$$ LANGUAGE plpgsql;
+
+
+-- INTERPOLATE SIMPLE REGION WITH SRC = POINT
+CREATE OR REPLACE FUNCTION public.interpolate_src_point(src_time float, dest_time float, src_point geometry, dest segment[])
+RETURNS msegment[] AS $$
+DECLARE
+    the_msegments msegment[];
+    d_seg segment;  
+    dn integer;
+BEGIN
+    -- Interpolation algorithm here
+    -- each segment must project triangle to the src point
+    dn = 1;
+    -- begin for loop to create delta triangles (moving segments)
+    FOREACH d_seg IN ARRAY dest
+    LOOP
+        SELECT array_append(the_msegments, create_msegment1(d_seg, dest_time, src_point, src_time)) into the_msegments;
+        RAISE NOTICE 'msegment added: %',ST_AsText(the_msegments[dn]);
+        dn = dn + 1;
+    END LOOP;
+    RETURN the_msegments;
+END
+$$ LANGUAGE plpgsql;
+
+
+
+
+
