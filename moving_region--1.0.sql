@@ -169,56 +169,77 @@ BEGIN
 END
 $$ LANGUAGE plpgsql;
 
-CREATE OR REPLACE FUNCTION public.minute(mnt float)
+CREATE OR REPLACE FUNCTION public.second(yr integer, mon integer, dy integer, hr integer, mnt integer, sec integer)
 RETURNS period AS $$
-DECLARE the_period period;
+DECLARE 
+    the_period period;
 BEGIN
-    the_period.tstart := (mnt-1)*60 + 1;
-    the_period.tend := (mnt-1)*60 + 60;
+    the_period.tstart := extract(epoch from make_timestamp(yr, mon, dy, hr, mnt, sec))::float;
+    the_period.tend := extract(epoch from make_timestamp(yr, mon, dy, hr, mnt, sec))::float;
     RETURN the_period;
 END
 $$ LANGUAGE plpgsql;
 
-CREATE OR REPLACE FUNCTION public.hour(hr float)
+CREATE OR REPLACE FUNCTION public.minute(yr integer, mon integer, dy integer, hr integer, mnt integer)
 RETURNS period AS $$
-DECLARE the_period period;
+DECLARE 
+    the_period period;
 BEGIN
-    the_period.tstart := (hr-1)*60*60 + 1;
-    the_period.tend := (hr-1)*60*60 + 60*60;
+    the_period.tstart := extract(epoch from make_timestamp(yr, mon, dy, hr, mnt, 0))::float;
+    the_period.tend := extract(epoch from make_timestamp(yr, mon, dy, hr, mnt, 59))::float;
     RETURN the_period;
 END
 $$ LANGUAGE plpgsql;
 
-CREATE OR REPLACE FUNCTION public.day(dy float)
+CREATE OR REPLACE FUNCTION public.hour(yr integer, mon integer, dy integer, hr integer)
 RETURNS period AS $$
-DECLARE the_period period;
+DECLARE 
+    the_period period;
 BEGIN
-    the_period.tstart := (dy-1)*60*60*24 + 1;
-    the_period.tend := (dy-1)*60*60*24 + 60*60*24;
+    the_period.tstart := extract(epoch from make_timestamp(yr, mon, dy, hr, 0, 0))::float;
+    the_period.tend := extract(epoch from make_timestamp(yr, mon, dy, hr, 59, 59))::float;
     RETURN the_period;
 END
 $$ LANGUAGE plpgsql;
 
-CREATE OR REPLACE FUNCTION public.month(mon float)
+CREATE OR REPLACE FUNCTION public.day(yr integer, mon integer, dy integer)
 RETURNS period AS $$
-DECLARE the_period period;
+DECLARE 
+    the_period period;
 BEGIN
-    IF mon = 1 OR mon = 5 OR mon = 7 OR mon = 8 OR mon = 10 OR mon = 12 THEN
-        the_period.tstart := (mon-1)*60*60*24*30 + 1;
-        the_period.tend := (mon-1)*60*60*24*30 + 60*60*24*31;
-    ELSIF mon = 2 THEN
-        the_period.tstart := (mon-1)*60*60*24*31 + 1;
-        the_period.tend := (mon-1)*60*60*24*31 + 60*60*24*28;
-    ELSIF mon = 3 THEN
-        the_period.tstart := (mon-1)*60*60*24*28 + 1;
-        the_period.tend := (mon-1)*60*60*24*28 + 60*60*24*31;
-    ELSIF mon = 8 THEN
-        the_period.tstart := (mon-1)*60*60*24*31 + 1;
-        the_period.tend := (mon-1)*60*60*24*31 + 60*60*24*31;
+    the_period.tstart := extract(epoch from make_timestamp(yr, mon, dy, 0, 0, 0))::float;
+    the_period.tend := extract(epoch from make_timestamp(yr, mon, dy, 23, 59, 59))::float;
+    RETURN the_period;
+END
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION public.month(yr integer, mon integer)
+RETURNS period AS $$
+DECLARE 
+    the_period period;
+    day_end integer;
+BEGIN
+    the_period.tstart := extract(epoch from make_timestamp(yr, mon, 1, 0, 0, 0))::float;
+    IF (mon = 1 OR mon = 3 OR mon = 5 OR mon = 7 OR mon = 8 OR mon = 10 OR mon = 12) THEN
+        the_period.tend := extract(epoch from make_timestamp(yr, mon, 31, 23, 59, 59))::float;
+    ELSIF (mon = 2 AND yr%4 = 0) THEN
+        the_period.tend := extract(epoch from make_timestamp(yr, mon, 29, 23, 59, 59))::float;
+    ELSIF (mon = 2 AND yr%4 != 0) THEN
+        the_period.tend := extract(epoch from make_timestamp(yr, mon, 28, 23, 59, 59))::float;
     ELSE
-        the_period.tstart := (mon-1)*60*60*24*31 + 1;
-        the_period.tend := (mon-1)*60*60*24*31 + 60*60*24*30;
+        the_period.tend := extract(epoch from make_timestamp(yr, mon, 30, 23, 59, 59))::float;
     END IF;
+    RETURN the_period;
+END
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION public.year(yr integer)
+RETURNS period AS $$
+DECLARE 
+    the_period period;
+BEGIN
+    the_period.tstart := extract(epoch from make_timestamp(yr, 1, 1, 0, 0, 0))::float;
+    the_period.tend := extract(epoch from make_timestamp(yr, 12, 31, 23, 59, 59))::float;
     RETURN the_period;
 END
 $$ LANGUAGE plpgsql;
