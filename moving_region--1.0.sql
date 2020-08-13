@@ -68,7 +68,12 @@ BEGIN
     the_intervalregion.dest_time = dest_time;
     the_intervalregion.src_reg = src_reg;
     the_intervalregion.dest_reg = dest_reg;
-    SELECT create_msegments(src_time, dest_time, src_reg, dest_reg) INTO the_intervalregion.moving_segments;
+    IF NOT (ST_Equals(src_reg, dest_reg) AND src_time = dest_time) THEN
+        SELECT create_msegments(src_time, dest_time, src_reg, dest_reg) INTO the_intervalregion.moving_segments;
+    ELSE
+        SELECT array_append(the_intervalregion.moving_segments, null) INTO the_intervalregion.moving_segments;
+    END IF;
+    
     RETURN the_intervalregion;
 END
 $$ LANGUAGE plpgsql;
@@ -160,6 +165,60 @@ DECLARE the_period period;
 BEGIN
     the_period.tstart := tstart;
     the_period.tend := tend;
+    RETURN the_period;
+END
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION public.minute(mnt float)
+RETURNS period AS $$
+DECLARE the_period period;
+BEGIN
+    the_period.tstart := (mnt-1)*60 + 1;
+    the_period.tend := (mnt-1)*60 + 60;
+    RETURN the_period;
+END
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION public.hour(hr float)
+RETURNS period AS $$
+DECLARE the_period period;
+BEGIN
+    the_period.tstart := (hr-1)*60*60 + 1;
+    the_period.tend := (hr-1)*60*60 + 60*60;
+    RETURN the_period;
+END
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION public.day(dy float)
+RETURNS period AS $$
+DECLARE the_period period;
+BEGIN
+    the_period.tstart := (dy-1)*60*60*24 + 1;
+    the_period.tend := (dy-1)*60*60*24 + 60*60*24;
+    RETURN the_period;
+END
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION public.month(mon float)
+RETURNS period AS $$
+DECLARE the_period period;
+BEGIN
+    IF mon = 1 OR mon = 5 OR mon = 7 OR mon = 8 OR mon = 10 OR mon = 12 THEN
+        the_period.tstart := (mon-1)*60*60*24*30 + 1;
+        the_period.tend := (mon-1)*60*60*24*30 + 60*60*24*31;
+    ELSIF mon = 2 THEN
+        the_period.tstart := (mon-1)*60*60*24*31 + 1;
+        the_period.tend := (mon-1)*60*60*24*31 + 60*60*24*28;
+    ELSIF mon = 3 THEN
+        the_period.tstart := (mon-1)*60*60*24*28 + 1;
+        the_period.tend := (mon-1)*60*60*24*28 + 60*60*24*31;
+    ELSIF mon = 8 THEN
+        the_period.tstart := (mon-1)*60*60*24*31 + 1;
+        the_period.tend := (mon-1)*60*60*24*31 + 60*60*24*31;
+    ELSE
+        the_period.tstart := (mon-1)*60*60*24*31 + 1;
+        the_period.tend := (mon-1)*60*60*24*31 + 60*60*24*30;
+    END IF;
     RETURN the_period;
 END
 $$ LANGUAGE plpgsql;
@@ -398,7 +457,7 @@ BEGIN
             -- it means just assign the previous progress angle in the ori segments
             idx = -1;
         ELSE
-            SELECT find_pg_idx_compare(ori_seg[ori_idx], ori_idx, chull_seg) INTO idx;
+            SELECT find_pg_idx_compare(ori_seg, ori_idx, chull_seg) INTO idx;
         END IF;
     END IF;
     RETURN idx;
@@ -498,7 +557,7 @@ BEGIN
                 get_arr_segment(create_array_pg(dest_reg))
         INTO src, dest;
         -- If convex
-        IF (is_convex(src_reg) AND is_convex(src_reg)) THEN
+        IF (is_convex(src_reg) AND is_convex(dest_reg)) THEN
             -- progress angle = unchanged
             SELECT  get_arr_pg(create_array_pg(src_reg)), 
                     get_arr_pg(create_array_pg(dest_reg))
@@ -669,21 +728,126 @@ BEGIN
 END
 $$ LANGUAGE plpgsql;
 
+-- GET VALUE MAX
+CREATE OR REPLACE FUNCTION public.get_array_max(arr float[])
+RETURNS float AS $$
+DECLARE 
+    max float;
+    elmt float;
+BEGIN
+    max = arr[1];
+    FOREACH elmt in ARRAY arr 
+    LOOP
+        IF (elmt > max) THEN
+            max = elmt;
+        END IF;
+    END LOOP;
+    RETURN max;
+END
+$$ LANGUAGE plpgsql;
+
+-- GET VALUE MIN
+CREATE OR REPLACE FUNCTION public.get_array_min(arr float[])
+RETURNS float AS $$
+DECLARE 
+    min float;
+    elmt float;
+BEGIN
+    min = arr[1];
+    FOREACH elmt in ARRAY arr 
+    LOOP
+        IF (elmt < min) THEN
+            min = elmt;
+        END IF;
+    END LOOP;
+    RETURN min;
+END
+$$ LANGUAGE plpgsql;
+
+-- GET IDX MAX
+CREATE OR REPLACE FUNCTION public.get_array_max_idx(arr float[])
+RETURNS integer[] AS $$
+DECLARE 
+    max float;
+    idx_arr integer[];
+    i integer;
+    elmt float;
+BEGIN
+    SELECT get_array_max(arr) INTO max;
+    i = 1;
+    FOREACH elmt in ARRAY arr 
+    LOOP
+        IF (elmt = max) THEN
+            SELECT array_append(idx_arr, i) INTO idx_arr;
+        END IF;
+        i = i + 1;
+    END LOOP;
+    
+    RETURN idx_arr;
+END
+$$ LANGUAGE plpgsql;
+
+-- GET IDX MIN
+CREATE OR REPLACE FUNCTION public.get_array_min_idx(arr float[])
+RETURNS integer[] AS $$
+DECLARE 
+    min float;
+    idx_arr integer[];
+    i integer;
+    elmt float;
+BEGIN
+    SELECT get_array_min(arr) INTO min;
+    i = 1;
+    FOREACH elmt IN ARRAY arr 
+    LOOP
+        IF (elmt = min) THEN
+            SELECT array_append(idx_arr, i) INTO idx_arr;
+        END IF;
+        i = i + 1;
+    END LOOP;
+    
+    RETURN idx_arr;
+END
+$$ LANGUAGE plpgsql;
+
 ------------------------------------------------------------------------------------
 --------------------- FUNGSI PROYEKSI (PADA DOMAIN DAN RANGE -----------------------
 ------------------------------------------------------------------------------------
 
 -- DEFTIME
-CREATE OR REPLACE FUNCTION public.deftime(mreg mregion)
-RETURNS period AS $$
+CREATE OR REPLACE FUNCTION public.deftime1(mreg mregion)
+RETURNS period[] AS $$
 DECLARE
     tstart float;
     tend float;
+    srctime_arr float[];
+    destime_arr float[];
+    intvlreg intervalregion;
+    i integer;
+    periods period[];
 BEGIN
-    SELECT get_src_time(mreg[1]) INTO tstart;
-    SELECT get_dest_time(mreg[array_length(mreg, 1)]) INTO tend;
+    IF mreg IS NULL THEN
+        RETURN NULL;
+    END IF;
+    FOREACH intvlreg IN ARRAY mreg::intervalregion[]
+    LOOP
+        SELECT array_append(srctime_arr, get_src_time(intvlreg)) INTO srctime_arr;
+        SELECT array_append(destime_arr, get_dest_time(intvlreg)) INTO destime_arr;
+    END LOOP;
 
-    RETURN period(tstart,tend);
+    i = 1;
+    tstart = srctime_arr[i];
+    LOOP
+        IF (destime_arr[i] != srctime_arr[i+1]) OR (destime_arr[i] != srctime_arr[i+1] IS NULL) THEN
+            tend = destime_arr[i];
+            SELECT array_append(periods, period(tstart, tend)) INTO periods;
+            tstart = srctime_arr[i+1];
+        END IF;
+        i = i + 1;
+    EXIT WHEN (i > array_length(destime_arr, 1));
+    END LOOP;
+
+    RETURN periods;
 END
 $$ LANGUAGE plpgsql;
 
@@ -696,7 +860,7 @@ DECLARE
     result geometry;
     i integer;
 BEGIN
-    SELECT get_src_region(atinstant_intvlreg(mreg,get_tstart(deftime(mreg)))) INTO result;
+    SELECT get_src_region(atinstant_intvlreg(mreg,inst(initial(mreg)))) INTO result;
 
     FOREACH intvlreg IN ARRAY mreg::intervalregion[]
     LOOP
@@ -820,7 +984,7 @@ BEGIN
             IF ((idx_tend - idx_tstart) > 1) THEN
                 FOR i IN 1..(idx_tend-idx_tstart-1)
                 LOOP
-                    SELECT append_intervalregion(mreg_result, mreg[i+idx_start]) INTO mreg_result;
+                    SELECT append_intervalregion(mreg_result, mreg[i+idx_tstart]) INTO mreg_result;
                 END LOOP;
             END IF;
 
@@ -868,16 +1032,46 @@ $$ LANGUAGE plpgsql;
 -- PRESENT (time: instant)
 CREATE OR REPLACE FUNCTION public.present(mreg mregion, inst float)
 RETURNS boolean AS $$
-    SELECT get_tstart(deftime(mreg)) <= inst 
-    AND get_tend(deftime(mreg)) >= inst;
-$$ LANGUAGE SQL;
+DECLARE
+    is_present boolean;
+    per period;
+BEGIN
+    is_present = false;
+    IF mreg IS NULL THEN
+        RETURN false;
+	END IF;
+    FOREACH per IN ARRAY deftime1(mreg) 
+    LOOP
+        IF (get_tstart(per) <= inst AND get_tend(per) >= inst) THEN
+            is_present = true;
+            RETURN is_present;
+        END IF;
+    END LOOP;
+    RETURN is_present;
+END
+$$ LANGUAGE plpgsql;
 
 -- PRESENT (time: period)
 CREATE OR REPLACE FUNCTION public.present(mreg mregion, per period)
 RETURNS boolean AS $$
-    SELECT get_tstart(deftime(mreg)) <= get_tstart(per) 
-    AND get_tend(deftime(mreg)) >= get_tend(per);
-$$ LANGUAGE SQL;
+DECLARE
+    is_present boolean;
+    pdeftime period;
+BEGIN
+    is_present = false;
+    IF mreg IS NULL THEN
+        RETURN false;
+	END IF;
+    FOREACH pdeftime IN ARRAY deftime1(mreg) 
+    LOOP
+        IF (get_tstart(pdeftime) <= get_tstart(per) AND get_tend(pdeftime) >= get_tend(per)) THEN
+            is_present = true;
+            RETURN is_present;
+        END IF;
+    END LOOP;
+    RETURN is_present;
+END
+$$ LANGUAGE plpgsql;
 
 -- AT
 CREATE OR REPLACE FUNCTION public.at(mreg mregion, geom geometry)
@@ -898,8 +1092,6 @@ BEGIN
     LOOP
         FOR i in get_src_time(intvlreg)..get_dest_time(intvlreg)
         LOOP
-            -- When the z index % 5 is not 0, n error encountered with 3DIntersect function.
-            -- Should be fixed soon 
             -- look for tstart in which mreg initially passes the 'geom'
             IF (NOT tstart_found) THEN
                 IF (ST_Intersects(geom, val(atinstant(mreg, i)))) THEN
@@ -909,7 +1101,7 @@ BEGIN
             -- if tstart found, look for the tend
             ELSE
                 IF (NOT ST_Intersects(geom, val(atinstant(mreg, i)))) THEN
-                    tend = i;
+                    tend = i-1;
                     tend_found = true;
                 END IF;
             END IF;
@@ -925,15 +1117,194 @@ BEGIN
 END
 $$ LANGUAGE plpgsql;
 
+-- GET SNAPSHOTS FROM MREGION
+CREATE OR REPLACE FUNCTION public.get_snapshots(mreg mregion)
+RETURNS geometry[] AS $$
+DECLARE 
+    snapshots geometry[];
+	i integer;
+	intvlreg intervalregion;
+BEGIN
+    i = 1;
+    FOREACH intvlreg IN ARRAY mreg::intervalregion[]
+    LOOP
+        SELECT array_append(snapshots, get_src_region(intvlreg)) INTO snapshots;
+        IF (i = array_length(mreg::intervalregion[], 1)) THEN
+            SELECT array_append(snapshots, get_dest_region(intvlreg)) INTO snapshots;
+        END IF;
+        i = i + 1;
+    END LOOP;
+    RETURN snapshots;
+END
+$$ LANGUAGE plpgsql;
+
+-- GET SNAPSHOT TIMES FROM MREGION
+CREATE OR REPLACE FUNCTION public.get_snapshot_times(mreg mregion)
+RETURNS float[] AS $$
+DECLARE 
+    timee float[];
+	i integer;
+	intvlreg intervalregion;
+BEGIN
+    i = 1;
+    FOREACH intvlreg IN ARRAY mreg::intervalregion[]
+    LOOP
+        SELECT array_append(timee, get_src_time(intvlreg)) INTO timee;
+        IF (i = array_length(mreg::intervalregion[], 1)) THEN
+            SELECT array_append(timee, get_dest_time(intvlreg)) INTO timee;
+        END IF;
+        i = i + 1;
+    END LOOP;
+    RETURN timee;
+END
+$$ LANGUAGE plpgsql;
+
+
 -- ATMIN
+CREATE OR REPLACE FUNCTION public.atmin(mreg mregion)
+RETURNS mregion AS $$
+DECLARE 
+    snapshot geometry;
+    snapshots geometry[];
+    snapshot_times float[];
+    snapshot_areas float[];
+
+    idx_min_arr integer[];
+    idx_min integer;
+
+    new_mreg intervalregion[];
+    mreg1 intervalregion[];
+
+    i integer;
+    appended_idx integer;
+
+BEGIN
+    SELECT mreg::intervalregion[] INTO mreg1;
+
+    SELECT get_snapshots(mreg) INTO snapshots;
+    SELECT get_snapshot_times(mreg) INTO snapshot_times;
+
+    FOREACH snapshot IN ARRAY snapshots
+    LOOP
+        SELECT array_append(snapshot_areas, ST_Area(snapshot)) INTO snapshot_areas;
+    END LOOP;
+
+    SELECT get_array_min_idx(snapshot_areas) INTO idx_min_arr;
+
+    -- min area mregion: just in 1 snapshot
+    IF array_length(idx_min_arr,1) = 1 THEN
+        idx_min = idx_min_arr[1];
+        RETURN mregion(intervalregion( snapshot_times[idx_min], snapshot_times[idx_min], snapshots[idx_min], snapshots[idx_min] ));
+    -- min area mregion: just in 1 snapshot
+    ELSE
+        i = 1;
+        appended_idx = 0;
+        LOOP
+            -- if snapshots are in order (therefore: in the same intvlreg)
+            IF (idx_min_arr[i]+1 = idx_min_arr[i+1]) AND ((idx_min_arr[i]+1 = idx_min_arr[i+1]) IS NOT NULL) THEN
+                SELECT array_append(new_mreg, mreg1[idx_min_arr[i]]) INTO new_mreg;
+                appended_idx = i+1;
+            ELSE
+                IF (i != appended_idx) THEN
+                    SELECT array_append(new_mreg, intervalregion( 
+                                            snapshot_times[idx_min_arr[i]], 
+                                            snapshot_times[idx_min_arr[i]], 
+                                            snapshots[idx_min_arr[i]], 
+                                            snapshots[idx_min_arr[i]] ))
+                    INTO new_mreg;
+                END IF;
+            END IF;
+            i = i + 1;
+        EXIT WHEN (i > array_length(idx_min_arr,1));
+        END LOOP;
+        RETURN mregion(new_mreg);
+    END IF;
+END
+$$ LANGUAGE plpgsql;
 
 -- ATMAX
+CREATE OR REPLACE FUNCTION public.atmax(mreg mregion)
+RETURNS mregion AS $$
+DECLARE 
+    snapshot geometry;
+    snapshots geometry[];
+    snapshot_times float[];
+    snapshot_areas float[];
+
+    idx_max_arr integer[];
+    idx_max integer;
+
+    new_mreg intervalregion[];
+    mreg1 intervalregion[];
+
+    i integer;
+    appended_idx integer;
+
+BEGIN
+    SELECT mreg::intervalregion[] INTO mreg1;
+
+    SELECT get_snapshots(mreg) INTO snapshots;
+    SELECT get_snapshot_times(mreg) INTO snapshot_times;
+
+    FOREACH snapshot IN ARRAY snapshots
+    LOOP
+        SELECT array_append(snapshot_areas, ST_Area(snapshot)) INTO snapshot_areas;
+    END LOOP;
+
+    SELECT get_array_max_idx(snapshot_areas) INTO idx_max_arr;
+
+    -- max area mregion: just in 1 snapshot
+    IF array_length(idx_max_arr,1) = 1 THEN
+        idx_max = idx_max_arr[1];
+        RETURN mregion(intervalregion( snapshot_times[idx_max], snapshot_times[idx_max], snapshots[idx_max], snapshots[idx_max] ));
+    -- max area mregion: in several snapshots
+    ELSE
+        i = 1;
+        appended_idx = 0;
+        LOOP
+            -- if snapshots are in order (therefore: in the same intvlreg)
+            IF (idx_max_arr[i]+1 = idx_max_arr[i+1]) AND ((idx_max_arr[i]+1 = idx_max_arr[i+1]) IS NOT NULL) THEN
+                SELECT array_append(new_mreg, mreg1[idx_max_arr[i]]) INTO new_mreg;
+                appended_idx = i+1;
+            ELSE
+                IF (i != appended_idx) THEN
+                    SELECT array_append(new_mreg, intervalregion( 
+                                            snapshot_times[idx_max_arr[i]], 
+                                            snapshot_times[idx_max_arr[i]], 
+                                            snapshots[idx_max_arr[i]], 
+                                            snapshots[idx_max_arr[i]] ))
+                    INTO new_mreg;
+                END IF;
+            END IF;
+            i = i + 1;
+        EXIT WHEN (i > array_length(idx_max_arr,1));
+        END LOOP;
+        RETURN mregion(new_mreg);
+    END IF;
+END
+$$ LANGUAGE plpgsql;
 
 -- PASSES
 CREATE OR REPLACE FUNCTION public.passes(mreg mregion, geom geometry)
 RETURNS boolean AS $$
-    SELECT ST_Intersects(traversed(mreg), geom);
-$$ LANGUAGE SQL;
+DECLARE 
+    trav geometry;
+    passed boolean;
+	intvlreg intervalregion;
+BEGIN
+    FOREACH intvlreg IN ARRAY mreg::intervalregion[]
+    LOOP
+        IF ST_Intersects(get_src_region(intvlreg), geom) OR ST_Intersects(get_dest_region(intvlreg), geom) THEN
+            passed = true;
+        END IF;
+    END LOOP;
+    IF (NOT passed) THEN
+        SELECT traversed(mreg) INTO trav;
+        SELECT ST_Intersects(trav, geom) INTO passed;
+    END IF; 
+    RETURN passed;
+END
+$$ LANGUAGE plpgsql;
 
 -------------------------------------------------------------------------
 ------------------------ HELPERS FOR ATINSTANT --------------------------
@@ -1003,7 +1374,7 @@ BEGIN
     LOOP 
         SELECT ST_3DIntersection(seg, infinite_plane) INTO intersection_point;
         IF NOT ST_IsEmpty(intersection_point) THEN
-            SELECT array_append(arr_point, intersection_point) INTO arr_point;
+            SELECT array_append(arr_point, ST_SnapToGrid(intersection_point, 0.000001)) INTO arr_point;
         END IF;
     END LOOP;
    
@@ -1056,7 +1427,7 @@ DECLARE
     switched_multipoint geometry;
 BEGIN
     RAISE NOTICE 'SORT IDX PERTAMA';
-    IF (ST_Distance(ST_GeometryN(arr_multipoint[1],2),ST_GeometryN(arr_multipoint[2],1)) < 0.00000000001) THEN
+    IF (ST_Distance(ST_GeometryN(arr_multipoint[1],2),ST_GeometryN(arr_multipoint[2],1)) < 0.000001) THEN
         SELECT array_append(arr_new, arr_multipoint[1]) INTO arr_new;
     ELSE
         SELECT ST_Collect(ST_GeometryN(arr_multipoint[1],2), ST_GeometryN(arr_multipoint[1],1)) INTO switched_multipoint;
@@ -1067,7 +1438,7 @@ BEGIN
             RAISE NOTICE 'SORT IDX BERIKUTNYA';
             RAISE NOTICE 'INI %', st_astext(ST_GeometryN(arr_new[i-1],2));
             RAISE NOTICE 'INI %', st_astext(ST_GeometryN(arr_multipoint[i],1));
-            IF ST_Distance(ST_GeometryN(arr_multipoint[i],1),ST_GeometryN(arr_new[i-1],2)) < 0.00000000001 THEN
+            IF ST_Distance(ST_GeometryN(arr_multipoint[i],1),ST_GeometryN(arr_new[i-1],2)) < 0.000001 THEN
                 RAISE NOTICE 'SAMA NIH';
                 SELECT array_append(arr_new, arr_multipoint[i]) INTO arr_new;
             ELSE
@@ -1095,9 +1466,13 @@ BEGIN
                SELECT array_append(arr_new, ST_GeometryN(arr_multipoint[i],2)) INTO arr_new;             
             END IF;
         END LOOP;
+    IF NOT ST_Equals(arr_new[array_length(arr_new, 1)], arr_new[1]) THEN
+        arr_new[array_length(arr_new, 1)] = arr_new[1];
+	END IF;
     RETURN arr_new;
 END
 $$ LANGUAGE plpgsql;
+
 
 -- GET ARRAY OF POINTS FROM SORTED MULTIPOINT ARRAY
 CREATE OR REPLACE FUNCTION public.create_multi_arr(lol integer)
