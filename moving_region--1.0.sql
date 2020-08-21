@@ -68,11 +68,25 @@ BEGIN
     the_intervalregion.dest_time = dest_time;
     the_intervalregion.src_reg = src_reg;
     the_intervalregion.dest_reg = dest_reg;
-    IF NOT (ST_Equals(src_reg, dest_reg) AND src_time = dest_time) THEN
-        SELECT create_msegments(src_time, dest_time, src_reg, dest_reg) INTO the_intervalregion.moving_segments;
+    IF (ST_GeometryType(src_reg) = 'ST_Point' AND ST_GeometryType(dest_reg) = 'ST_Point' AND src_time=dest_time) THEN
+        the_intervalregion.moving_segments = NULL;
     ELSE
-        SELECT array_append(the_intervalregion.moving_segments, null) INTO the_intervalregion.moving_segments;
+        SELECT create_msegments(src_time, dest_time, src_reg, dest_reg) INTO the_intervalregion.moving_segments;
     END IF;
+    
+    RETURN the_intervalregion;
+END
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION public.intervalregion(intvlreg intervalregion, src_time float, dest_time float, src_reg geometry, dest_reg geometry)
+RETURNS intervalregion AS $$
+DECLARE the_intervalregion intervalregion;
+BEGIN
+    the_intervalregion.src_time = src_time;
+    the_intervalregion.dest_time = dest_time;
+    the_intervalregion.src_reg = src_reg;
+    the_intervalregion.dest_reg = dest_reg;
+    SELECT intvlreg.moving_segments INTO the_intervalregion.moving_segments;
     
     RETURN the_intervalregion;
 END
@@ -834,6 +848,18 @@ $$ LANGUAGE plpgsql;
 ------------------------------------------------------------------------------------
 --------------------- FUNGSI PROYEKSI (PADA DOMAIN DAN RANGE -----------------------
 ------------------------------------------------------------------------------------
+-- DEFTIME
+CREATE OR REPLACE FUNCTION public.deftime(mreg mregion)
+RETURNS period AS $$
+DECLARE
+    tstart float;
+    tend float;
+BEGIN
+    SELECT get_src_time(mreg[1]) INTO tstart;
+    SELECT get_dest_time(mreg[array_length(mreg, 1)]) INTO tend;
+    RETURN period(tstart,tend);
+END
+$$ LANGUAGE plpgsql;
 
 -- DEFTIME
 CREATE OR REPLACE FUNCTION public.deftime1(mreg mregion)
@@ -984,7 +1010,9 @@ DECLARE
     reg_tend geometry;
     intvlreg intervalregion;
     i integer;
+    mreg_arr intervalregion[];
 BEGIN
+    SELECT mreg::intervalregion[] INTO mreg_arr;
     IF present(mreg, per) THEN
         SELECT  atinstant_intvlreg_idx(mreg, get_tstart(per)),
                 atinstant_intvlreg_idx(mreg, get_tend(per)),
@@ -993,13 +1021,13 @@ BEGIN
         INTO idx_tstart, idx_tend, reg_tstart, reg_tend;
         -- In the same interval region
         IF (idx_tstart = idx_tend) THEN
-            SELECT append_intervalregion(mreg_result,intervalregion(get_tstart(per), get_tend(per), reg_tstart, reg_tend))
+            SELECT append_intervalregion(mreg_result,intervalregion(mreg_arr[idx_tstart],get_tstart(per), get_tend(per), reg_tstart, reg_tend))
             INTO mreg_result;
             RETURN mreg_result;
         -- In different interval region
         ELSE
             --SELECT atinstant_intvlreg(mreg, get_tstart(per)) INTO intvlreg;
-            SELECT append_intervalregion(mreg_result,intervalregion(get_tstart(per), get_dest_time(atinstant_intvlreg(mreg, get_tstart(per))), reg_tstart, get_dest_region(atinstant_intvlreg(mreg, get_tstart(per)))))
+            SELECT append_intervalregion(mreg_result,intervalregion(mreg_arr[idx_tstart], get_tstart(per), get_dest_time(atinstant_intvlreg(mreg, get_tstart(per))), reg_tstart, get_dest_region(atinstant_intvlreg(mreg, get_tstart(per)))))
             INTO mreg_result;
 
             IF ((idx_tend - idx_tstart) > 1) THEN
@@ -1010,7 +1038,7 @@ BEGIN
             END IF;
 
             --SELECT atinstant_intvlreg(mreg, get_tend(per)) INTO intvlreg;
-            SELECT append_intervalregion(mreg_result, intervalregion(get_src_time(atinstant_intvlreg(mreg, get_tend(per))), get_tend(per), get_src_region(atinstant_intvlreg(mreg, get_tend(per))), reg_tend))
+            SELECT append_intervalregion(mreg_result, intervalregion(mreg_arr[idx_t], get_src_time(atinstant_intvlreg(mreg, get_tend(per))), get_tend(per), get_src_region(atinstant_intvlreg(mreg, get_tend(per))), reg_tend))
             INTO mreg_result;
 
             RETURN mreg_result;
@@ -1207,7 +1235,8 @@ BEGIN
 
     FOREACH snapshot IN ARRAY snapshots
     LOOP
-        SELECT array_append(snapshot_areas, ST_Area(snapshot)) INTO snapshot_areas;
+        SELECT array_append(snapshot_areas, round(CAST(ST_Area(snapshot) AS NUMERIC), 10)::float) INTO snapshot_areas;
+        
     END LOOP;
 
     SELECT get_array_min_idx(snapshot_areas) INTO idx_min_arr;
@@ -1269,7 +1298,7 @@ BEGIN
 
     FOREACH snapshot IN ARRAY snapshots
     LOOP
-        SELECT array_append(snapshot_areas, ST_Area(snapshot)) INTO snapshot_areas;
+        SELECT array_append(snapshot_areas, round(CAST(ST_Area(snapshot) AS NUMERIC), 10)::float) INTO snapshot_areas;
     END LOOP;
 
     SELECT get_array_max_idx(snapshot_areas) INTO idx_max_arr;
