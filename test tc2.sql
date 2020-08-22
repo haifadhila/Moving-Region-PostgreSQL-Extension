@@ -1,5 +1,11 @@
 -- SQL commands to test moving region extension
 
+CREATE TABLE data_mregion(
+	id integer primary key,
+	name VARCHAR(50),
+	the_mregion mregion
+)
+
 -- DATA INSERTION
 -- to tc2 intervalregion table
 INSERT INTO tc2 VALUES(1, intervalregion(1, 50, ST_GeomFromText('POINT(110.072225 -7.397931)', 4326), ST_Polygon('LINESTRING(110.032802 -7.456366, 110.014020 -7.473366, 110.015498 -7.516727, 110.101650 -7.554951,110.140042 -7.540164,110.135237 -7.495852,110.095237 -7.495852,110.032802  -7.456366)', 4326)));
@@ -23,103 +29,86 @@ SELECT traversed(the_mregion) FROM data_mregion where id = 5;
 
 -- TEST COMMANDS FOR: PROJECTION OPERATIONS
 -- deftime
-SELECT deftime(the_mregion) FROM data_mregion where id = 5
+SELECT deftime(the_mregion) 
+FROM data_mregion 
+WHERE id = 5;
 
 -- traversed
+SELECT traversed(the_mregion) 
+FROM data_mregion 
+WHERE id = 5;
 
 -- inst
+SELECT inst(atinstant(the_mregion,257)) 
+FROM data_mregion 
+WHERE id = 5;
 
 -- val
+SELECT val(atinstant(the_mregion,257)) 
+FROM data_mregion 
+WHERE id = 5;
 
 -- TEST COMMANDS FOR: INTERACTION OPERATIONS
 -- atinstant
+SELECT atinstant(the_mregion,257) 
+FROM data_mregion 
+WHERE id = 5;
 
 -- atperiods
+SELECT atperiods(the_mregion, period(200,365)) 
+FROM data_mregion 
+WHERE id = 5;
 
--- initial/ final
-
--- present
+SELECT traversed(atperiods(the_mregion, period(200,365))) 
+FROM data_mregion 
+WHERE id = 5;
 
 -- passes
+SELECT p.name 
+FROM province p, data_mregion m
+WHERE p.admin = 'Indonesia' 
+AND m.id = 5 
+AND passes(m.the_mregion, p.geom);
 
 -- at
+SELECT at(m.the_mregion, p.geom)
+FROM province p, data_mregion m
+WHERE p.name = 'Yogyakarta' 
+AND m.id = 5;
+
+SELECT deftime(m.the_mregion, p.geom)
+FROM province p, data_mregion m
+WHERE p.name = 'Yogyakarta' 
+AND m.id = 5;
+
+-- initial/ final
+SELECT val(initial(at(m.the_mregion, p.geom)))
+FROM province p, data_mregion m
+WHERE p.name = 'Yogyakarta' 
+AND m.id = 5;
+
+SELECT final(at(m.the_mregion, p.geom))
+FROM province p, data_mregion m
+WHERE p.name = 'Yogyakarta' 
+AND m.id = 5;
 
 -- atmin/ atmax
-SELECT deftime(atmax(the_mregion)) FROM data_mregion where id = 5
-SELECT traversed(atmax(the_mregion)) FROM data_mregion where id = 5
+SELECT atmax(the_mregion)
+FROM data_mregion 
+WHERE id = 5;
 
+SELECT deftime(atmax(the_mregion)) 
+FROM data_mregion 
+WHERE id = 5;
 
+SELECT traversed(atmax(the_mregion)) 
+FROM data_mregion 
+WHERE id = 5;
 
+-- present
+SELECT deftime(the_mregion) 
+FROM data_mregion;
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-CREATE TABLE data_mregion(
-	id integer primary key,
-	name VARCHAR(50),
-	the_mregion mregion
-)
-
-
-
-select traversed(the_mregion) from data_mregion where id=4
-
-SELECT val(atinstant(atperiods(the_mregion, period(200,400)),368)) from data_mregion
-
-SELECT p.name 
-FROM province p, data_mregion m
-WHERE p.admin = 'Indonesia' 
-AND m.id = 4 
-AND passes(atperiods(m.the_mregion, period(200,400)), p.geom)
-
-SELECT p.name 
-FROM province p, data_mregion m
-WHERE p.admin = 'Indonesia' 
-AND m.id = 4 
-AND passes(m.the_mregion, p.geom)
-
-
-SELECT traversed(at(atperiods(m.the_mregion, period(200,400)), p.geom))
-FROM province p, data_mregion m
-WHERE p.name = 'Yogyakarta' 
-AND m.id = 4 
-
-SELECT deftime(at(atperiods(m.the_mregion, period(200,400)), p.geom))
-FROM province p, data_mregion m
-WHERE p.name = 'Yogyakarta' 
-AND m.id = 4 
-
-SELECT traversed(at(m.the_mregion, p.geom))
-FROM province p, data_mregion m
-WHERE p.name = 'Yogyakarta' 
-AND m.id = 4 
-
-
-SELECT val(atinstant(atperiods(the_mregion, period(200,400)),368)) from data_mregion
-
-SELECT (val(atinstant(atperiods(the_mregion, period(45,99)),45))) from data_mregion where id=4;
---SELECT (val(atinstant(the_mregion,245))) from data_mregion where id=4
+SELECT * 
+FROM data_mregion 
+WHERE present(the_mregion, 350);
