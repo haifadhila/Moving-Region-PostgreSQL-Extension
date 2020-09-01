@@ -374,15 +374,6 @@ RETURNS msegment AS $$
             );
 $$ LANGUAGE SQL;
 
--- FUNGSI ST_AsText UNTUK MSEGMENT
-CREATE OR REPLACE FUNCTION public.ST_AsText(mseg msegment)
-RETURNS text AS $$
-BEGIN
-    RETURN CONCAT('(',ST_AsText(mseg.mseg_a),',',ST_AsText(mseg.mseg_b),',',ST_AsText(mseg.mseg_c),')');
-END
-$$ LANGUAGE plpgsql;
-
-
 -- CHECK IF POLYGON IS CONVEX
 CREATE OR REPLACE FUNCTION public.is_convex(reg geometry)
 RETURNS boolean AS $$
@@ -1551,5 +1542,86 @@ BEGIN
         RAISE NOTICE 'THE ELMT: %', ST_AsText(elmt);
     END LOOP;
     return the_array;
+END
+$$ LANGUAGE plpgsql;
+
+
+-------------------------------------------------------------------------
+---------------- FUNGSI ST_AsText UNTUK TIPE DATA BARU ------------------
+-------------------------------------------------------------------------
+
+-- FUNGSI ST_AsText UNTUK MSEGMENT
+CREATE OR REPLACE FUNCTION public.ST_AsText(mseg msegment)
+RETURNS text AS $$
+BEGIN
+    RETURN CONCAT('(',ST_AsText(mseg.mseg_a),',',ST_AsText(mseg.mseg_b),',',ST_AsText(mseg.mseg_c),')');
+END
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION public.asText(mseg msegment)
+RETURNS text AS $$
+BEGIN
+    RETURN CONCAT('msegment(',ST_AsText(mseg.mseg_a),',',ST_AsText(mseg.mseg_b),',',ST_AsText(mseg.mseg_c),')');
+END
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION public.asText(msegments msegment[])
+RETURNS text AS $$
+DECLARE
+    txt text;
+	mseg msegment; 
+BEGIN
+    txt = '{ ';
+    FOR i IN 1..array_length(msegments,1)
+    LOOP
+        IF (i != array_length(msegments,1)) THEN
+            SELECT CONCAT(txt, asText(msegments[i]),', ') INTO txt;
+        ELSE
+            SELECT CONCAT(txt, asText(msegments[i]),' }') INTO txt;
+        END IF;
+    END LOOP;
+    RETURN txt;
+END
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION public.asText(intvlreg intervalregion)
+RETURNS text AS $$
+DECLARE
+    txt text;
+	mseg msegment; 
+BEGIN
+    txt = 'intervalregion: ( ';
+    SELECT CONCAT(txt, 'src-time:',get_src_time(intvlreg),', ') INTO txt;
+    SELECT CONCAT(txt, 'dest-time:',get_dest_time(intvlreg),', ') INTO txt;
+    SELECT CONCAT(txt, 'src-region:',ST_AsText(get_src_region(intvlreg)),', ') INTO txt;
+    SELECT CONCAT(txt, 'dest-region:',ST_AsText(get_dest_region(intvlreg)),', ') INTO txt;
+    SELECT CONCAT(txt, 'msegments:',asText(get_moving_segments(intvlreg)),' )') INTO txt;
+
+    RETURN txt;
+END
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION public.asText(mreg mregion)
+RETURNS text AS $$
+DECLARE
+    txt text;
+BEGIN
+    txt = 'mregion: { ';
+    FOR i IN 1..array_length(mreg,1)
+    LOOP
+        IF (i != array_length(mreg,1)) THEN
+            SELECT CONCAT(txt, asText(mreg[i]),', ') INTO txt;
+        ELSE
+            SELECT CONCAT(txt, asText(mreg[i]),' }') INTO txt;
+        END IF;
+    END LOOP;
+    RETURN txt;
+END
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION public.asText(intime1 intime)
+RETURNS text AS $$
+BEGIN
+    RETURN CONCAT('intime(inst:',inst(intime1),', val:',ST_AsText(val(intime1)),')');
 END
 $$ LANGUAGE plpgsql;
