@@ -173,6 +173,16 @@ CREATE TYPE period AS (
     tend float
 );
 
+CREATE TYPE period_tsz AS (
+    tstart timestamptz,
+    tend timestamptz
+);
+
+CREATE TYPE period_ts AS (
+    tstart timestamp,
+    tend timestamp
+);
+
 CREATE OR REPLACE FUNCTION public.period(tstart float, tend float)
 RETURNS period AS $$
 DECLARE the_period period;
@@ -180,6 +190,47 @@ BEGIN
     the_period.tstart := tstart;
     the_period.tend := tend;
     RETURN the_period;
+END
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION public.period_ts(tstart timestamp, tend timestamp)
+RETURNS period_ts AS $$
+DECLARE the_period period_ts;
+BEGIN
+    the_period.tstart := tstart;
+    the_period.tend := tend;
+    RETURN the_period;
+END
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION public.period_tsz(tstart timestamptz, tend timestamptz)
+RETURNS period_tsz AS $$
+DECLARE the_period period_tsz;
+BEGIN
+    the_period.tstart := tstart;
+    the_period.tend := tend;
+    RETURN the_period;
+END
+$$ LANGUAGE plpgsql;
+
+
+-- Timestamp
+CREATE OR REPLACE FUNCTION public.ts_unix(yr integer, mon integer, dy integer, hr integer, mnt integer, sec integer)
+RETURNS FLOAT AS $$
+    SELECT extract(epoch from make_timestamp(yr, mon, dy, hr, mnt, sec))::float;
+$$ LANGUAGE SQL;
+
+CREATE OR REPLACE FUNCTION public.ts_unix_id(yr integer, mon integer, dy integer, hr integer, mnt integer, sec integer)
+RETURNS FLOAT AS $$
+DECLARE 
+    ts float;
+BEGIN
+    IF (hr-7 >= 0) THEN
+        SELECT extract(epoch from make_timestamp(yr, mon, dy, hr-7, mnt, sec))::float INTO ts;
+    ELSE
+        SELECT extract(epoch from make_timestamp(yr, mon, dy-1, 24+hr-7, mnt, sec))::float INTO ts;
+    END IF;
+    RETURN ts;
 END
 $$ LANGUAGE plpgsql;
 
@@ -194,6 +245,8 @@ BEGIN
 END
 $$ LANGUAGE plpgsql;
 
+
+-- Period from year, month, and so on
 CREATE OR REPLACE FUNCTION public.minute(yr integer, mon integer, dy integer, hr integer, mnt integer)
 RETURNS period AS $$
 DECLARE 
@@ -258,6 +311,7 @@ BEGIN
 END
 $$ LANGUAGE plpgsql;
 
+
 -- Get tstart in a period
 CREATE OR REPLACE FUNCTION public.get_tstart(the_period period)
 RETURNS float AS $$
@@ -318,6 +372,20 @@ $$ LANGUAGE SQL;
 ----------------------------------------------------------------------------------
 ---------------------- INTERPOLATION ALGORITHM HELPERS ---------------------------
 ----------------------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION public.normalize_coordinate(geom geometry)
+RETURNS geometry AS $$
+DECLARE 
+    x float;
+    y float;
+BEGIN
+    select st_x(geom), st_y(geom) into x,y;
+    if (y > 0) THEN
+        y = -1*y;
+    end if;
+    return st_setsrid(st_makepoint(x, y), 4326);
+END
+$$ LANGUAGE plpgsql;
+
 
 -- FUNGSI PROGRESS ANGLE
 -- SELECT calculate_progress_angle(ST_GeomFromText('LINESTRING(3 3,0 0)', 4326))
@@ -332,8 +400,8 @@ BEGIN
     /* angle formed by rotating an imaginary ray shooting in 
     the negative y direction counterclockwise around the primary 
     endpoint of s until its collinear and overlapping with s */
-    SELECT ST_PointN(seg, 1) INTO primary_endpoint;
-    SELECT ST_PointN(seg, 2) INTO secondary_endpoint;
+    SELECT normalize_coordinate(ST_PointN(seg, 1)) INTO primary_endpoint;
+    SELECT normalize_coordinate(ST_PointN(seg, 2)) INTO secondary_endpoint;
     SELECT 360 - degrees(ST_Azimuth(secondary_endpoint, primary_endpoint)) INTO progress_angle;
     return progress_angle;
 END
@@ -839,16 +907,26 @@ $$ LANGUAGE plpgsql;
 ------------------------------------------------------------------------------------
 --------------------- FUNGSI PROYEKSI (PADA DOMAIN DAN RANGE -----------------------
 ------------------------------------------------------------------------------------
--- DEFTIME
+
+-- DEFTIME OLD
 CREATE OR REPLACE FUNCTION public.deftime(mreg mregion)
 RETURNS period AS $$
-DECLARE
-    tstart float;
-    tend float;
 BEGIN
     SELECT get_src_time(mreg[1]) INTO tstart;
     SELECT get_dest_time(mreg[array_length(mreg, 1)]) INTO tend;
     RETURN period(tstart,tend);
+END
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION public.to_ts(per period)
+RETURNS period_tsz AS $$
+DECLARE
+    tstart timestamptz;
+    tend timestamptz;
+BEGIN
+    SELECT to_timestamp(get_tstart(per)) INTO tstart;
+    SELECT to_timestamp(get_tend(per)) INTO tend;
+    RETURN period_tsz(tstart,tend);
 END
 $$ LANGUAGE plpgsql;
 
@@ -889,8 +967,59 @@ BEGIN
 END
 $$ LANGUAGE plpgsql;
 
+-- Periods to timestamp
+CREATE OR REPLACE FUNCTION public.to_timestamp(per period[])
+RETURNS period_tsz[] AS $$
+DECLARE
+    tstart timestamptz;
+    tend timestamptz;
+    arr period_tsz[];
+	p period;
+BEGIN
+    FOREACH p IN ARRAY per
+    LOOP
+        SELECT to_timestamp(get_tstart(p)) INTO tstart;
+        SELECT to_timestamp(get_tend(p)) INTO tend;
+        SELECT array_append(arr, period_tsz(tstart,tend)) INTO arr;
+    END LOOP;
+    RETURN arr;
+END
+$$ LANGUAGE plpgsql;
+
 -- TRAVERSED
 CREATE OR REPLACE FUNCTION public.traversed(mreg mregion)
+RETURNS geometry AS $$
+DECLARE
+    intvlreg intervalregion;
+    mseg msegment;
+    result geometry;
+    i integer;
+    diff integer;
+BEGIN
+    SELECT get_src_region(atinstant_intvlreg(mreg,inst(initial(mreg)))) INTO result;
+
+    FOREACH intvlreg IN ARRAY mreg::intervalregion[]
+    LOOP
+        IF (get_dest_time(intvlreg)-get_src_time(intvlreg) > 50) THEN
+            SELECT div(get_dest_time(intvlreg)::integer - get_src_time(intvlreg)::integer, 50) INTO diff;
+        ELSE
+            diff = 1;
+        END IF;
+        FOR i in get_src_time(intvlreg)..get_dest_time(intvlreg)
+        LOOP
+            IF (mod(i, diff)) = 0 THEN
+                SELECT ST_Union(result,val(atinstant(mreg,i))) INTO result;
+                RAISE NOTICE 'i: %',i;
+                RAISE NOTICE 'val: %',st_astext(val(atinstant(mreg,i)));
+            END IF;
+        END LOOP;
+    END LOOP;
+
+    RETURN result;
+END
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION public.traversedd(mreg mregion)
 RETURNS geometry AS $$
 DECLARE
     intvlreg intervalregion;
@@ -1040,6 +1169,27 @@ BEGIN
 END
 $$ LANGUAGE plpgsql;
 
+-- select traversed(atperiods(the_mregion,period(67,125))) from tes5
+CREATE OR REPLACE FUNCTION public.atperiods(mreg mregion, pers period[])
+RETURNS mregion AS $$
+DECLARE
+    mreg_result intervalregion[];
+    intvlreg intervalregion;
+    per period;
+    mreg_temp intervalregion[];
+BEGIN
+    FOREACH per IN ARRAY pers
+    LOOP
+        SELECT atperiods(mreg, per) INTO mreg_temp;
+        FOREACH intvlreg IN ARRAY mreg_temp
+        LOOP
+            SELECT append_intervalregion(mreg_result, intvlreg) INTO mreg_result;
+        END LOOP;
+    END LOOP;
+    RETURN mreg_result;
+END
+$$ LANGUAGE plpgsql;
+
 
 -- INITIAL
 CREATE OR REPLACE FUNCTION public.initial(mreg mregion)
@@ -1119,18 +1269,25 @@ RETURNS mregion AS $$
 DECLARE
     tstart float;
     tend float;
+    i integer;
     tstart_found boolean;
     tend_found boolean;
     both_found boolean;
 	intvlreg intervalregion;
     time_last float;
+    diff integer;
 BEGIN
     tstart_found = false;
     tend_found = false;
     both_found = false;
+    IF (get_dest_time(intvlreg)-get_src_time(intvlreg) > 50) THEN
+        SELECT div(get_dest_time(intvlreg)::integer - get_src_time(intvlreg)::integer, 50) INTO diff;
+    ELSE
+        diff = 1;
+    END IF;
     FOREACH intvlreg IN ARRAY mreg::intervalregion[]
     LOOP
-        FOR i in get_src_time(intvlreg)..get_dest_time(intvlreg)
+        i = get_src_time(intvlreg);
         LOOP
             -- look for tstart in which mreg initially passes the 'geom'
             IF (NOT tstart_found) THEN
@@ -1145,9 +1302,11 @@ BEGIN
                     tend_found = true;
                 END IF;
             END IF;
-        EXIT WHEN (tend_found);
+            i = i + diff;
+        EXIT WHEN (tend_found OR i > get_dest_time(intvlreg));
         END LOOP;
         time_last = get_dest_time(intvlreg);
+    EXIT WHEN (tend_found);
     END LOOP;
 
     IF (NOT tend_found) THEN
@@ -1591,8 +1750,8 @@ DECLARE
 	mseg msegment; 
 BEGIN
     txt = 'intervalregion: ( ';
-    SELECT CONCAT(txt, 'src-time:',get_src_time(intvlreg),', ') INTO txt;
-    SELECT CONCAT(txt, 'dest-time:',get_dest_time(intvlreg),', ') INTO txt;
+    SELECT CONCAT(txt, 'src-time:',to_timestamp(get_src_time(intvlreg)),', ') INTO txt;
+    SELECT CONCAT(txt, 'dest-time:',to_timestamp(get_dest_time(intvlreg)),', ') INTO txt;
     SELECT CONCAT(txt, 'src-region:',ST_AsText(get_src_region(intvlreg)),', ') INTO txt;
     SELECT CONCAT(txt, 'dest-region:',ST_AsText(get_dest_region(intvlreg)),', ') INTO txt;
     SELECT CONCAT(txt, 'msegments:',asText(get_moving_segments(intvlreg)),' )') INTO txt;
@@ -1622,6 +1781,6 @@ $$ LANGUAGE plpgsql;
 CREATE OR REPLACE FUNCTION public.asText(intime1 intime)
 RETURNS text AS $$
 BEGIN
-    RETURN CONCAT('intime(inst:',inst(intime1),', val:',ST_AsText(val(intime1)),')');
+    RETURN CONCAT('intime(inst:',to_timestamp(inst(intime1)),', val:',ST_AsText(val(intime1)),')');
 END
 $$ LANGUAGE plpgsql;
